@@ -190,7 +190,6 @@ Check local regulations before using this on anything else.
 ```
 telemetry-sniffer/
 ├─ README.md                 ← you are here
-├─ PROGRESS.md                ← raw bring-up dev log (secrets redacted)
 ├─ LICENSE                    ← GPL-3.0 (inherited from ExpressLRS)
 ├─ docs/                      ← protocol reference, build/bringup guides
 ├─ firmware/                  ← patch + new sources layered on ExpressLRS 3.5.6

@@ -8,7 +8,7 @@ of the target link's **binding phrase** is assumed.
 > **Status: this file is the docs-folder index.** For current project status,
 > credits, hardware/compatibility notes, build instructions, and the roadmap,
 > see the top-level [`../README.md`](../README.md) — that's the maintained
-> entry point. `PROGRESS.md` in the repo root is the raw bring-up dev log.
+> entry point.
 >
 > **If you are reproducing or extending this, read `05_working_config_and_gotchas.md`
 > first** — it has the known‑good pin layout/config and every non‑obvious fix.
