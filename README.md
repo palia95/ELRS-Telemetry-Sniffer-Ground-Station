@@ -1,7 +1,6 @@
-# ELRS Telemetry Sniffer Ground Station
+# ELRS TLM RX — passive ELRS telemetry sniffer (LILYGO T3-S3)
 
-Firmware ("**ELRS TLM RX**") + ground station apps for a **receive-only**
-second receiver that overhears the telemetry your own
+A **receive-only** second receiver that overhears the telemetry your own
 drone's ELRS receiver sends back to its handset — GPS, battery, attitude,
 flight mode — decodes it to CRSF, and bridges it to a laptop/phone over BLE
 and USB serial. Runs on a LILYGO T3-S3 (ESP32-S3 + SX1280). Requires knowing
@@ -30,10 +29,7 @@ Android app is a drafted skeleton, not yet functional. See **Roadmap** below.
   and adds the OLED status display, BLE bridge, and GCS apps on top.
 
 If you use or extend this, please keep both credits — none of the hard part
-(the actual ELRS protocol/RF work) is ours. This repo is **not** a GitHub
-fork of either project — it's a standalone rework/derivative that credits
-and builds on both, since the actual change against ExpressLRS is a small
-patch plus new files rather than a full in-tree modification.
+(the actual ELRS protocol/RF work) is ours.
 
 ## How it works
 
@@ -72,10 +68,6 @@ of building a separate receive-only device:
   only ever needs to be built once, independent of whatever TX hardware you
   own.
 
-(The same reasoning shows up again in a related but separate project of
-ours on Direct Remote ID broadcasting — same principle: keep anything
-non-essential off the flight-critical link.)
-
 ## Hardware
 
 LILYGO T3-S3 (ESP32-S3 + SX1280). **Confirm your board revision before
@@ -110,26 +102,18 @@ is logged in [`docs/05_working_config_and_gotchas.md`](docs/05_working_config_an
   so far — Linux/Windows should work but aren't verified.
 - **Android app:** not yet functional — skeleton only, see Roadmap.
 
-## Security / privacy — do not commit your binding phrase
+## Binding phrase
 
 The binding phrase is effectively a shared secret: anyone who has it can
 derive your link's UID and decode its telemetry (and, per ExpressLRS's own
-security model, its control link). This repo is designed so **your phrase
-never needs to be committed anywhere**:
+security model, its control link):
 
 - `firmware/build.sh` takes the phrase as a **command-line argument** and
   writes it into `user_defines.txt` / `data/options.json` **inside the
-  separate ExpressLRS checkout you point it at** — outside this repo
-  entirely.
-- `.gitignore` here also backstops this defensively (`user_defines.txt`,
-  `**/data/options.json`) in case that ever changes.
-- The bundled example/test phrase that appeared in early bring-up notes has
-  been redacted from `PROGRESS.md`. Use your own phrase; never reuse an
-  example phrase from any doc for a real link.
+  separate ExpressLRS checkout you point it at**.
 - The UID can also be set **at runtime** without a reflash, over serial
   (`P:<phrase>`) or BLE — useful for switching target links without
-  rebuilding firmware, but treat that channel with the same care as the
-  phrase itself.
+  rebuilding firmware.
 
 ## Build & flash
 
@@ -185,7 +169,7 @@ build yet.
 - [ ] **GCS: network Remote ID** — relay decoded position as a *network*
       Remote ID feed (sent to a USS/service provider over the internet),
       distinct from *direct* (local broadcast) Remote ID, which is a
-      separate, aircraft-side project of ours, not part of this sniffer.
+      separate, aircraft-side Direct Remote ID.
 - [ ] **T3-S3 battery management** — the board's onboard IP5306 charge/
       power-bank IC already supports running from a LiPo; add charge-state
       reporting (voltage, charging/discharging) to the firmware heartbeat,
@@ -210,6 +194,3 @@ telemetry-sniffer/
 ├─ gcs/                       ← Python ground station (macOS native + browser)
 └─ android/                   ← Android app skeleton (not yet functional)
 ```
-
-(A `case/` folder with 3D-printable stand designs exists locally but is
-gitignored — not published here.)
