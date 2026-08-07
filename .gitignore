@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller build artifacts for the native macOS app — regenerate with
+# gcs/build_app.sh, don't commit ~110MB of bundled binaries.
+gcs/build/
+gcs/dist/
+
+# PlatformIO build output, if firmware/ is ever built in place instead of
+# against a separate ExpressLRS checkout.
+.pio/
+**/.pio/
+
+# Local secrets — NEVER commit a real binding phrase or the UID it derives.
+# build.sh writes these into the *separate* ExpressLRS checkout you point it
+# at (outside this repo), not here — this entry is a defensive backstop only.
+user_defines.txt
+**/data/options.json
+
+# Android / Gradle
+android/**/build/
+android/.gradle/
+android/local.properties

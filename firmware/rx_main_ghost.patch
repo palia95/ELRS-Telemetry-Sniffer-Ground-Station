@@ -1,0 +1,60 @@
+--- a/src/rx_main.cpp	2026-07-29 08:48:37.019018744 +0200
++++ b/src/rx_main.cpp	2026-07-29 21:19:15.289778803 +0200
+@@ -6,6 +6,7 @@
+ #include "telemetry.h"
+ #include "stubborn_sender.h"
+ #include "stubborn_receiver.h"
++#include "sniffer.h"
+ 
+ #include "lua.h"
+ #include "msp.h"
+@@ -391,6 +392,9 @@
+     }
+ 
+     OtaUpdateSerializers(smWideOr8ch, ModParams->PayloadLength);
++#if defined(GHOST_SNIFFER)
++    Sniffer_OnRateChanged();
++#endif
+     MspReceiver.setMaxPackageIndex(ELRS_MSP_MAX_PACKAGES);
+     TelemetrySender.setMaxPackageIndex(OtaIsFullRes ? ELRS8_TELEMETRY_MAX_PACKAGES : ELRS4_TELEMETRY_MAX_PACKAGES);
+ 
+@@ -475,6 +479,9 @@
+ 
+ bool ICACHE_RAM_ATTR HandleSendTelemetryResponse()
+ {
++#if defined(GHOST_NO_TX)
++    return false; // Ghost sniffer: never transmit; stay in RX to overhear telemetry
++#endif
+     uint8_t modresult = (OtaNonce + 1) % ExpressLRS_currTlmDenom;
+ 
+     if ((connectionState == disconnected) || (ExpressLRS_currTlmDenom == 1) || (alreadyTLMresp == true) || (modresult != 0) || !teamraceHasModelMatch)
+@@ -1154,6 +1161,9 @@
+             && !InBindingMode;
+         break;
+     case PACKET_TYPE_TLM:
++#if defined(GHOST_SNIFFER)
++        Sniffer_ProcessTLM(otaPktPtr);
++#endif
+         if (firmwareOptions.is_airport)
+         {
+             OtaUnpackAirportData(otaPktPtr, &apOutputBuffer);
+@@ -2166,6 +2176,9 @@
+ #endif
+ 
+     devicesStart();
++#if defined(GHOST_SNIFFER)
++    Ghost_SetupTransports();
++#endif
+ 
+     // setup() eats up some of this time, which can cause the first mode connection to fail.
+     // Resetting the time here give the first mode a better chance of connection.
+@@ -2186,6 +2199,9 @@
+     }
+ 
+     devicesUpdate(now);
++#if defined(GHOST_SNIFFER)
++    Ghost_Loop(now);
++#endif
+ 
+     // read and process any data from serial ports, send any queued non-RC data
+     handleSerialIO();
