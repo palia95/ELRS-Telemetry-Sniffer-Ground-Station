@@ -50,7 +50,6 @@ telemetry-sniffer/
 │     ├─ devTransport_BLE.cpp               ← BLE GATT (Nordic UART Service) — done, working
 │     └─ devTransport_WiFiUDP.cpp           ← WiFi UDP broadcast of CRSF frames — deferred
 ├─ gcs/                                     ← Python ground-station app (macOS native + browser)
-├─ case/                                    ← 3D-printable stand for the T3-S3 board
 └─ android/
    └─ app/…                                 ← Compose app skeleton: CRSF parser + BLE client + UI
                                                (drafted, NOT YET FUNCTIONAL — see roadmap)

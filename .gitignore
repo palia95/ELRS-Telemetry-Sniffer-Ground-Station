@@ -25,3 +25,7 @@ user_defines.txt
 android/**/build/
 android/.gradle/
 android/local.properties
+
+# 3D-printable case/stand designs — kept local only, not published here
+# (includes a downloaded third-party design of unknown license).
+case/
