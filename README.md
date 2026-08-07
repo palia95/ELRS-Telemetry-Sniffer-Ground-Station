@@ -1,6 +1,7 @@
-# ELRS TLM RX — passive ELRS telemetry sniffer (LILYGO T3-S3)
+# ELRS Telemetry Sniffer Ground Station
 
-A **receive-only** second receiver that overhears the telemetry your own
+Firmware ("**ELRS TLM RX**") + ground station apps for a **receive-only**
+second receiver that overhears the telemetry your own
 drone's ELRS receiver sends back to its handset — GPS, battery, attitude,
 flight mode — decodes it to CRSF, and bridges it to a laptop/phone over BLE
 and USB serial. Runs on a LILYGO T3-S3 (ESP32-S3 + SX1280). Requires knowing
@@ -29,7 +30,10 @@ Android app is a drafted skeleton, not yet functional. See **Roadmap** below.
   and adds the OLED status display, BLE bridge, and GCS apps on top.
 
 If you use or extend this, please keep both credits — none of the hard part
-(the actual ELRS protocol/RF work) is ours.
+(the actual ELRS protocol/RF work) is ours. This repo is **not** a GitHub
+fork of either project — it's a standalone rework/derivative that credits
+and builds on both, since the actual change against ExpressLRS is a small
+patch plus new files rather than a full in-tree modification.
 
 ## How it works
 
@@ -204,6 +208,8 @@ telemetry-sniffer/
 ├─ docs/                      ← protocol reference, build/bringup guides
 ├─ firmware/                  ← patch + new sources layered on ExpressLRS 3.5.6
 ├─ gcs/                       ← Python ground station (macOS native + browser)
-├─ android/                   ← Android app skeleton (not yet functional)
-└─ case/                      ← 3D-printable stand for the T3-S3 board
+└─ android/                   ← Android app skeleton (not yet functional)
 ```
+
+(A `case/` folder with 3D-printable stand designs exists locally but is
+gitignored — not published here.)
