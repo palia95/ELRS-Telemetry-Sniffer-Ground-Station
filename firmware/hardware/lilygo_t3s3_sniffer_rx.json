@@ -1,0 +1,36 @@
+{
+  "_comment": "LILYGO T3-S3 (ESP32-S3 + SX1280 2.4GHz) hardware layout for the ELRS Ghost/Sniffer RX.",
+  "_comment_pins": "Pins verified against LilyGo T3-S3 SX1280 community docs. VERIFY the RF-switch / PA lines against YOUR board revision (v1.0 non-PA vs v1.2 'H658' PA) before trusting RX sensitivity.",
+  "_comment_usage": "This is the ELRS unified-firmware hardware layout. Flash it into the RX config partition (see docs/02_build_flash_guide.md). Alternatively use firmware/target/T3S3_Sniffer_RX.h for a compile-time build.",
+
+  "product_name": "LILYGO T3S3 ELRS Telemetry Sniffer RX",
+  "lua_name": "T3S3 Ghost",
+  "_comment_serial": "No serial_rx/serial_tx on purpose: a sniffer has no flight controller. Omitting them makes ELRS use a no-op FC serial (SerialNOOP) instead of endlessly trying to auto-detect an FC baud rate (unsupported on S3 -> log spam). Debug/telemetry still route to USBSerial via DEBUG_LOG.",
+  "reg_domain": "ISM2G4",
+
+  "radio_busy": 36,
+  "radio_dio1": 9,
+  "radio_miso": 3,
+  "radio_mosi": 6,
+  "radio_nss": 7,
+  "radio_rst": 8,
+  "radio_sck": 5,
+  "radio_dcdc": true,
+
+  "_comment_rfsw": "T3-S3 SX1280 PA/FEM RF switch. Rev 1.1/1.2 (H658 PA) route the RX/TX enable to GPIO21 (RXEN) and GPIO10 (TXEN). ELRS drives RXEN HIGH during receive (RFAMP_hal). Without these the LNA path is never enabled and the radio is deaf even though SPI init succeeds. If you have a true bare-SX1280 v1.0 with no FEM, remove these two keys.",
+  "power_rxen": 21,
+  "power_txen": 10,
+
+  "power_min": 0,
+  "power_high": 3,
+  "power_max": 3,
+  "power_default": 0,
+  "_comment_power": "Receive-only: we never key TX. Bounds kept conservative regardless.",
+
+  "_comment_screen": "The 0.96in SSD1306 OLED (I2C, SDA=18 SCL=17) is driven directly by devGhostDisplay.cpp, NOT by the ELRS screen system, so no screen_* keys here (avoids I2C contention).",
+
+  "led": 37,
+  "_comment_led": "Onboard LED / addressable LED pin varies by rev; adjust or remove.",
+
+  "use_backpack": false
+}

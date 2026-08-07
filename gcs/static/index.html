@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ELRS TLM RX</title>
+<link rel="stylesheet" href="/static/leaflet.css"/>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--mut:#8b949e;--accent:#00e5ff;--good:#3fb950;--warn:#d29922;--bad:#f85149;}
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+  #app{display:grid;grid-template-columns:340px 1fr;grid-template-rows:44px 1fr;height:100%;}
+  header{grid-column:1/3;display:flex;align-items:center;gap:16px;padding:0 14px;
+    background:var(--panel);border-bottom:1px solid var(--line);}
+  header h1{font-size:15px;margin:0;letter-spacing:.5px;font-weight:600;}
+  header h1 span{color:var(--accent);}
+  .status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--bad);}
+  .dot.on{background:var(--good);}
+  .grow{flex:1;}
+  button{background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:6px;
+    padding:6px 12px;font-size:12px;cursor:pointer;}
+  button:hover{border-color:var(--accent);}
+  button.rec{background:#3d1418;border-color:var(--bad);color:#ffb4ad;}
+  aside{background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:12px;}
+  #map{width:100%;height:100%;background:#0a0e14;}
+  .inst{display:flex;gap:10px;margin-bottom:12px;}
+  canvas{background:#05070a;border:1px solid var(--line);border-radius:8px;}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:13px;}
+  .grid .k{color:var(--mut);}
+  .grid .v{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;}
+  h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);
+    margin:14px 0 6px;border-bottom:1px solid var(--line);padding-bottom:4px;}
+  .mode-badge{font-size:15px;font-weight:700;color:var(--accent);}
+  .leaflet-container{background:#0a0e14;}
+  .foot{font-size:11px;color:var(--mut);margin-top:12px;line-height:1.5;}
+  .src .row{display:flex;gap:6px;align-items:center;margin:6px 0;flex-wrap:wrap;}
+  select,input[type=text]{background:#21262d;color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:5px 8px;font-size:12px;flex:1;min-width:120px;}
+  input[type=text]::placeholder{color:#6e7681;}
+  .chip{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--mut);}
+  .chip.on{color:var(--good);border-color:var(--good);}
+  .chip.err{color:var(--bad);border-color:var(--bad);}
+  .chip.conn{color:var(--warn);border-color:var(--warn);}
+  .dev{display:flex;justify-content:space-between;gap:8px;align-items:center;
+    padding:6px 8px;border:1px solid var(--line);border-radius:6px;margin:4px 0;cursor:pointer;font-size:12px;}
+  .dev:hover{border-color:var(--accent);}
+  .dev .g{color:var(--accent);font-weight:600;}
+  .dev small{color:var(--mut);}
+  #bleHdr{cursor:pointer;justify-content:space-between;font-size:12px;color:var(--mut);
+    user-select:none;border-top:1px solid var(--line);padding-top:8px;}
+  #bleList{max-height:230px;overflow-y:auto;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>ELRS TLM <span>RX</span></h1>
+    <div class="status"><span id="linkDot" class="dot"></span><span id="linkTxt">no data</span></div>
+    <div class="status"><span id="rxAge">—</span></div>
+    <div class="grow"></div>
+    <div class="status" id="framesTxt">0 frames</div>
+    <button id="recBtn">● Record</button>
+  </header>
+
+  <aside>
+    <h2 style="margin-top:0">Source</h2>
+    <div class="src">
+      <div class="row">
+        <span id="srcChip" class="chip">idle</span>
+        <span id="srcDesc" style="font-size:12px;color:var(--mut)"></span>
+      </div>
+      <div class="row">
+        <select id="serialSel"><option value="">— serial ports —</option></select>
+        <button id="serialBtn">Connect</button>
+      </div>
+      <div class="row">
+        <button id="scanBtn">Scan BLE</button>
+        <button id="dcBtn">Disconnect</button>
+      </div>
+      <div class="row">
+        <input id="phrase" type="text" placeholder="ELRS binding phrase" autocomplete="off" spellcheck="false"/>
+        <button id="phraseBtn">Set UID</button>
+      </div>
+      <div class="foot" id="phraseFoot" style="margin-top:2px"></div>
+      <div class="row" id="bleHdr" style="display:none">
+        <span>BLE devices <span id="bleCount"></span></span>
+        <span id="bleToggle">▾</span>
+      </div>
+      <div id="bleList"></div>
+    </div>
+
+    <div class="inst">
+      <canvas id="ah" width="150" height="150"></canvas>
+      <canvas id="hsi" width="150" height="150"></canvas>
+    </div>
+
+    <div style="text-align:center;margin-bottom:8px;">
+      <span class="mode-badge" id="mode">—</span>
+    </div>
+
+    <h2>Attitude</h2>
+    <div class="grid">
+      <div class="k">Roll</div><div class="v" id="roll">—</div>
+      <div class="k">Pitch</div><div class="v" id="pitch">—</div>
+      <div class="k">Yaw</div><div class="v" id="yaw">—</div>
+      <div class="k">Heading</div><div class="v" id="hdg">—</div>
+    </div>
+
+    <h2>Position</h2>
+    <div class="grid">
+      <div class="k">Lat</div><div class="v" id="lat">—</div>
+      <div class="k">Lon</div><div class="v" id="lon">—</div>
+      <div class="k">GPS alt</div><div class="v" id="alt">—</div>
+      <div class="k">Sats</div><div class="v" id="sats">—</div>
+      <div class="k">Ground spd</div><div class="v" id="gs">—</div>
+      <div class="k">Vario</div><div class="v" id="vario">—</div>
+    </div>
+
+    <h2>Battery</h2>
+    <div class="grid">
+      <div class="k">Voltage</div><div class="v" id="volt">—</div>
+      <div class="k">Current</div><div class="v" id="curr">—</div>
+      <div class="k">Consumed</div><div class="v" id="mah">—</div>
+      <div class="k">Remaining</div><div class="v" id="pct">—</div>
+    </div>
+
+    <h2>Link (from stream)</h2>
+    <div class="grid">
+      <div class="k">RSSI</div><div class="v" id="rssi">—</div>
+      <div class="k">LQ</div><div class="v" id="lq">—</div>
+    </div>
+
+    <div class="foot" id="logFoot">Not recording.</div>
+    <div class="foot">RSSI/LQ here are only populated if the aircraft sends a
+      LINK_STATISTICS frame. The sniffer's own receive RSSI/LQ is shown on the
+      device OLED and serial heartbeat.</div>
+  </aside>
+
+  <div id="map"></div>
+</div>
+
+<script src="/static/leaflet.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const model = {};
+let lastRx = 0;      // last message of any kind (sniffer stream alive?)
+let tlmAge = null;   // seconds since last real drone telemetry (from backend)
+let lastSrcStatus = null;               // to detect connect transitions
+const PHRASE_KEY = 'elrs_tlm_phrase';   // remembered binding phrase
+
+// ---------- Map ----------
+const map = L.map('map', {zoomControl:true, attributionControl:false}).setView([0,0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19})
+  .addTo(map);
+let marker = null, trail = L.polyline([], {color:'#00e5ff', weight:2, opacity:.8}).addTo(map);
+let havePos = false, follow = true;
+map.on('dragstart', ()=>{ follow = false; });
+
+function droneIcon(hdg){
+  return L.divIcon({className:'', iconSize:[34,34], iconAnchor:[17,17],
+    html:`<div style="transform:rotate(${hdg||0}deg);transition:transform .2s">
+      <svg width="34" height="34" viewBox="0 0 34 34">
+        <polygon points="17,2 27,31 17,24 7,31" fill="#00e5ff" stroke="#04222a" stroke-width="1.5"/>
+      </svg></div>`});
+}
+function updateMap(){
+  if(model.lat==null||model.lon==null) return;
+  const ll=[model.lat, model.lon];
+  if(!marker){ marker = L.marker(ll, {icon:droneIcon(model.heading_deg)}).addTo(map); }
+  else { marker.setLatLng(ll); marker.setIcon(droneIcon(model.heading_deg)); }
+  const pts = trail.getLatLngs();
+  if(pts.length===0 || pts[pts.length-1].lat!==ll[0] || pts[pts.length-1].lng!==ll[1]){
+    trail.addLatLng(ll);
+    if(trail.getLatLngs().length>2000) trail.setLatLngs(trail.getLatLngs().slice(-2000));
+  }
+  if(!havePos){ map.setView(ll, 17); havePos=true; }
+  else if(follow){ map.panTo(ll, {animate:true, duration:.3}); }
+}
+
+// ---------- Artificial horizon ----------
+function drawAH(){
+  const c=$('ah'), g=c.getContext('2d'), W=c.width, H=c.height, cx=W/2, cy=H/2, R=W/2-4;
+  const roll=(model.roll_deg||0), pitch=(model.pitch_deg||0);
+  const ppd=1.6; // pixels per degree of pitch
+  g.clearRect(0,0,W,H);
+  g.save();
+  // clip to circle
+  g.beginPath(); g.arc(cx,cy,R,0,7); g.clip();
+  g.translate(cx,cy); g.rotate(-roll*Math.PI/180); g.translate(0, pitch*ppd);
+  // sky / ground
+  g.fillStyle='#2a6cd6'; g.fillRect(-R*2,-R*3,R*4,R*3);
+  g.fillStyle='#5a3a1e'; g.fillRect(-R*2,0,R*4,R*3);
+  g.strokeStyle='#fff'; g.lineWidth=1.5; g.beginPath(); g.moveTo(-R*2,0); g.lineTo(R*2,0); g.stroke();
+  // pitch ladder
+  g.strokeStyle='rgba(255,255,255,.8)'; g.fillStyle='#fff'; g.font='8px sans-serif'; g.textAlign='center';
+  for(let a=-30;a<=30;a+=10){ if(a===0) continue; const y=-a*ppd; const w=a%20===0?26:14;
+    g.beginPath(); g.moveTo(-w,y); g.lineTo(w,y); g.stroke();
+    if(a%20===0){ g.fillText(Math.abs(a), -w-10, y+3); g.fillText(Math.abs(a), w+10, y+3);} }
+  g.restore();
+  // fixed aircraft + roll arc
+  g.save(); g.translate(cx,cy);
+  g.strokeStyle='#00e5ff'; g.lineWidth=2.5;
+  g.beginPath(); g.moveTo(-30,0); g.lineTo(-10,0); g.moveTo(10,0); g.lineTo(30,0);
+  g.moveTo(0,-3); g.lineTo(0,3); g.stroke();
+  // roll arc marks
+  g.strokeStyle='#fff'; g.lineWidth=1;
+  for(const a of [-60,-45,-30,-20,-10,0,10,20,30,45,60]){
+    const rad=(a-90)*Math.PI/180, r1=R-2, r2=R-(a%30===0?10:6);
+    g.beginPath(); g.moveTo(Math.cos(rad)*r1,Math.sin(rad)*r1); g.lineTo(Math.cos(rad)*r2,Math.sin(rad)*r2); g.stroke();
+  }
+  // roll pointer
+  g.save(); g.rotate(-roll*Math.PI/180); g.fillStyle='#00e5ff';
+  g.beginPath(); g.moveTo(0,-R+2); g.lineTo(-5,-R+11); g.lineTo(5,-R+11); g.closePath(); g.fill();
+  g.restore();
+  g.restore();
+  g.strokeStyle='#30363d'; g.beginPath(); g.arc(cx,cy,R,0,7); g.stroke();
+}
+
+// ---------- Heading indicator (HSI / compass) ----------
+function drawHSI(){
+  const c=$('hsi'), g=c.getContext('2d'), W=c.width,H=c.height,cx=W/2,cy=H/2,R=W/2-4;
+  const hdg=model.heading_deg||0;
+  g.clearRect(0,0,W,H);
+  g.fillStyle='#05070a'; g.beginPath(); g.arc(cx,cy,R,0,7); g.fill();
+  g.save(); g.translate(cx,cy); g.rotate(-hdg*Math.PI/180);
+  g.strokeStyle='#3a4250'; g.fillStyle='#c9d1d9'; g.textAlign='center'; g.font='9px sans-serif';
+  for(let a=0;a<360;a+=30){ const rad=(a-90)*Math.PI/180;
+    const r1=R-2, r2=R-8; g.lineWidth=1;
+    g.beginPath(); g.moveTo(Math.cos(rad)*r1,Math.sin(rad)*r1); g.lineTo(Math.cos(rad)*r2,Math.sin(rad)*r2); g.stroke();
+    const lbl={0:'N',90:'E',180:'S',270:'W'}[a] || (a/10);
+    g.save(); g.translate(Math.cos(rad)*(R-20), Math.sin(rad)*(R-20)); g.rotate(hdg*Math.PI/180);
+    g.fillStyle=(a%90===0)?'#00e5ff':'#8b949e'; g.fillText(lbl,0,3); g.restore();
+  }
+  g.restore();
+  // fixed aircraft + top pointer
+  g.fillStyle='#00e5ff'; g.beginPath(); g.moveTo(cx,cy-R+2); g.lineTo(cx-6,cy-R+12); g.lineTo(cx+6,cy-R+12); g.closePath(); g.fill();
+  g.strokeStyle='#00e5ff'; g.lineWidth=2; g.beginPath();
+  g.moveTo(cx,cy-12); g.lineTo(cx,cy+12); g.moveTo(cx-10,cy+6); g.lineTo(cx+10,cy+6); g.stroke();
+  g.fillStyle='#e6edf3'; g.font='bold 13px sans-serif'; g.textAlign='center';
+  g.fillText((hdg|0)+'°', cx, cy+R-6);
+  g.strokeStyle='#30363d'; g.beginPath(); g.arc(cx,cy,R,0,7); g.stroke();
+}
+
+// ---------- Values ----------
+const f1=(v,u='')=> (v==null?'—':(Math.round(v*10)/10)+u);
+const f0=(v,u='')=> (v==null?'—':(v|0)+u);
+function updatePanel(){
+  $('mode').textContent = model.mode || '—';
+  $('roll').textContent  = f1(model.roll_deg,'°');
+  $('pitch').textContent = f1(model.pitch_deg,'°');
+  $('yaw').textContent   = f1(model.yaw_deg,'°');
+  $('hdg').textContent   = f0(model.heading_deg,'°');
+  $('lat').textContent   = model.lat==null?'—':model.lat.toFixed(6);
+  $('lon').textContent   = model.lon==null?'—':model.lon.toFixed(6);
+  $('alt').textContent   = f0(model.alt_gps_m,' m');
+  $('sats').textContent  = f0(model.sats);
+  $('gs').textContent    = f1(model.groundspeed_kmh,' km/h');
+  $('vario').textContent = model.vario_ms==null?'—':f1(model.vario_ms,' m/s');
+  $('volt').textContent  = f1(model.batt_v,' V');
+  $('curr').textContent  = f1(model.batt_a,' A');
+  $('mah').textContent   = f0(model.batt_mah,' mAh');
+  $('pct').textContent   = f0(model.batt_pct,' %');
+  $('rssi').textContent  = model.link_rssi1_dbm==null?'—':model.link_rssi1_dbm+' dBm';
+  $('lq').textContent    = model.link_lq==null?'—':model.link_lq;
+  $('framesTxt').textContent = (model.frames||0)+' frames';
+}
+
+function redraw(){ drawAH(); drawHSI(); updatePanel(); updateMap(); }
+
+// ---------- staleness ----------
+setInterval(()=>{
+  const msgAge = lastRx ? (Date.now()-lastRx)/1000 : null;   // sniffer stream alive?
+  const dot=$('linkDot'), txt=$('linkTxt'), ra=$('rxAge');
+  if(msgAge==null || msgAge>5){ dot.className='dot'; txt.textContent='no data'; ra.textContent='—'; return; }
+  // stream is alive (RSSI/LQ still update); judge DRONE telemetry freshness
+  if(tlmAge==null){ dot.className='dot'; txt.textContent='no telemetry'; ra.textContent='—'; }
+  else if(tlmAge<3){ dot.className='dot on'; txt.textContent='receiving'; ra.textContent='live'; }
+  else { dot.className='dot'; txt.textContent='no telemetry'; ra.textContent=tlmAge.toFixed(0)+'s'; }
+}, 500);
+
+// ---------- WebSocket ----------
+let ws;
+function connect(){
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = ev => {
+    const d = JSON.parse(ev.data);
+    if(d.type==='sources'){ renderSources(d); return; }
+    if(d.type!=='telemetry') return;
+    lastRx = Date.now();
+    if('tlm_age' in d) tlmAge = d.tlm_age;
+    for(const k in d){ if(d[k]!==null && d[k]!==undefined) model[k]=d[k]; }
+    const rec=$('recBtn');
+    if(d.logging){ rec.classList.add('rec'); rec.textContent='■ Stop'; $('logFoot').textContent='Recording → '+(d.log_path||''); }
+    else { rec.classList.remove('rec'); rec.textContent='● Record'; if(!model._everLogged) $('logFoot').textContent='Not recording.'; }
+    if(d.logging) model._everLogged=true;
+    redraw();
+  };
+  ws.onclose = ()=> setTimeout(connect, 1500);
+}
+
+function renderSources(d){
+  const s = d.source || {};
+  const chip = $('srcChip');
+  chip.textContent = s.status + (s.kind ? ' · '+s.kind : '');
+  chip.className = 'chip' + (s.status==='connected'?' on':(s.status==='error'?' err':(s.status==='connecting'?' conn':'')));
+  $('srcDesc').textContent = s.desc || '';
+  // On a fresh connection, re-push the saved phrase so the sniffer re-derives the
+  // UID (effective persistence across reboots/reconnects without flash writes).
+  if(s.status==='connected' && lastSrcStatus!=='connected'){
+    const p=(localStorage.getItem(PHRASE_KEY)||'').trim();
+    if(p) setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'set_phrase', phrase:p})); }catch(e){} }, 800);
+  }
+  lastSrcStatus = s.status;
+  // serial dropdown (keep current selection if still valid)
+  const sel = $('serialSel'), cur = sel.value;
+  sel.innerHTML = '<option value="">— serial ports —</option>' +
+    (d.serial_ports||[]).map(p=>`<option value="${p.port}">${p.port}</option>`).join('');
+  if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
+  else if(s.kind==='serial' && s.desc) sel.value=s.desc;
+  // BLE device list (collapsible)
+  const bl = $('bleList'), n = (d.ble_devices||[]).length;
+  $('bleHdr').style.display = (n>0 || d.scanning) ? 'flex' : 'none';
+  $('bleCount').textContent = n ? '('+n+')' : '';
+  if(d.scanning){ bl.innerHTML='<div style="font-size:12px;color:var(--mut)">scanning…</div>'; }
+  else {
+    const items = (d.ble_devices||[]).map(x=>{
+      const label=(x.name||'(unnamed)')+(x.match?' ★':'');
+      const rssi=(x.rssi!=null)?x.rssi+' dBm':'';
+      return `<div class="dev" data-addr="${x.addr}" data-name="${(x.name||'').replace(/"/g,'&quot;')}">
+        <span class="${x.match?'g':''}">${label}</span><small>${rssi}</small></div>`;
+    }).join('');
+    bl.innerHTML = items || '<div style="font-size:12px;color:var(--mut)">no devices — tap Scan BLE</div>';
+    bl.querySelectorAll('.dev').forEach(el=>el.onclick=()=>{
+      ws.send(JSON.stringify({cmd:'connect_ble', addr:el.dataset.addr, name:el.dataset.name}));
+    });
+  }
+  applyBleCollapse();
+}
+
+let bleCollapsed = false;
+function applyBleCollapse(){
+  $('bleList').style.display = bleCollapsed ? 'none' : 'block';
+  $('bleToggle').textContent = bleCollapsed ? '▸' : '▾';
+}
+$('bleHdr').onclick = ()=>{ bleCollapsed = !bleCollapsed; applyBleCollapse(); };
+
+$('recBtn').onclick = ()=> ws.send(JSON.stringify({cmd:'log', on: !$('recBtn').classList.contains('rec')}));
+$('scanBtn').onclick = ()=> ws.send(JSON.stringify({cmd:'scan_ble'}));
+$('serialBtn').onclick = ()=>{ const p=$('serialSel').value; if(p) ws.send(JSON.stringify({cmd:'connect_serial', port:p})); };
+$('dcBtn').onclick = ()=> ws.send(JSON.stringify({cmd:'disconnect'}));
+
+// ---- binding phrase -> ELRS UID ----
+$('phrase').value = localStorage.getItem(PHRASE_KEY) || '';
+function sendPhrase(){
+  const p = $('phrase').value.trim();
+  if(!p){ $('phraseFoot').textContent = 'Enter a binding phrase first.'; return; }
+  localStorage.setItem(PHRASE_KEY, p);
+  ws.send(JSON.stringify({cmd:'set_phrase', phrase:p}));
+  $('phraseFoot').textContent = 'Sent — sniffer re-deriving UID and re-locking…';
+}
+$('phraseBtn').onclick = sendPhrase;
+$('phrase').addEventListener('keydown', e=>{ if(e.key==='Enter') sendPhrase(); });
+
+connect();
+redraw();
+</script>
+</body>
+</html>
