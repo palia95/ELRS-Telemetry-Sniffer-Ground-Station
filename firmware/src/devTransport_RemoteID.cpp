@@ -20,20 +20,38 @@
 //   - Operator/take-off altitude: the same latched take-off altitude.
 //   - Baro altitude: passed through when BARO_ALTITUDE telemetry is present;
 //     "unknown" otherwise (Location.AltitudeBaro is optional in the spec).
-//   - Emergency status: CRSF FLIGHT_MODE decoded Betaflight-style ("!FS!" =
-//     failsafe) -> ODID_STATUS_EMERGENCY. Best-effort - not every FC/mode
-//     string follows this convention.
+//   - Status: CRSF FLIGHT_MODE decoded Betaflight-style - "!FS!" (failsafe)
+//     or "RTH" (GPS Rescue, itself part of Betaflight's failsafe escalation
+//     on RX loss) -> ODID_STATUS_EMERGENCY; disarmed with a fix -> GROUND;
+//     armed with a fix -> AIRBORNE. Best-effort - not every FC/mode string
+//     follows this convention (see PASS/CHIR and other FC's mode strings,
+//     which aren't specifically handled - only the arm-state suffix and the
+//     "!FS"/"RTH" substrings are inspected, so unrecognized mode names still
+//     classify correctly on arm state alone).
 // WAIT state: instances 0/1 only broadcast while a GPS fix exists (or is
 // fresh - stale >5s = treated as lost). No fix = nothing real to report, so
 // rather than broadcast a Basic-ID-only "ghost" drone with an undeclared
 // position, the ODID broadcast is paused entirely until a fix (re)appears.
 //
-// Take-off/operator position is latched at the moment FLIGHT_MODE reports
-// ARMED (falls back to "first GPS fix" if no flight-mode telemetry ever
-// arrives). We have no visibility into the pilot's own GNSS from a drone-side
-// sniffer, so this is reported as OperatorLocationType TAKEOFF, not LIVE_GNSS
-// - spec-legal, and a good approximation when the pilot launches from where
-// they're standing; not accurate for long-range/repositioned flying.
+// Take-off/operator position is latched at the moment FLIGHT_MODE reports a
+// clean ARMED transition (falls back to "first GPS fix" if no flight-mode
+// telemetry ever arrives; does NOT re-latch across a mid-flight RTH/failsafe
+// excursion - see the FLIGHT_MODE case below for why). We have no visibility
+// into the pilot's own GNSS from a drone-side sniffer, so this is reported as
+// OperatorLocationType TAKEOFF, not LIVE_GNSS - spec-legal, and a reasonable
+// snapshot when the pilot launches from where they're standing.
+//
+// IMPORTANT, read before trusting any "distance from pilot" computed from
+// this broadcast: OperatorLatitude/Longitude/AltitudeGeo are a ONE-TIME
+// SNAPSHOT taken at arm, not the pilot's live position. They go stale the
+// moment the pilot moves after arming (walking a track between race gates,
+// repositioning after launch, being handed the controller, etc.) or the
+// moment the flight goes long-range - there is no live pilot GNSS source on
+// this data path, and no field in the spec to flag "this operator location is
+// stale" (System has no operator-location accuracy field, unlike Location's
+// HorizAccuracy). Treat any distance/proximity a receiver derives from this
+// System message as approximate at best, accurate only near the moment of
+// arming, and not something to rely on for real separation/BVLOS decisions.
 //
 // Two lifecycle phases so the phone can actually connect:
 //
@@ -203,11 +221,18 @@ static float    s_baroAltM = -1000;
 static bool     s_haveBaro = false;
 static uint32_t s_lastBaroMs = 0;
 
-// Flight state, decoded from CRSF FLIGHT_MODE string (Betaflight convention:
-// "!FS!" = failsafe, trailing "*" = disarmed).
+// Flight state, decoded from CRSF FLIGHT_MODE string (Betaflight convention,
+// verified against src/main/telemetry/crsf.c: "!FS!" = failsafe; otherwise a
+// disarmed-only suffix of '*'/'!'/'?' means disarmed, no suffix means armed).
 static bool s_haveMode = false;
 static bool s_armed = false;
-static bool s_failsafe = false;
+// EMERGENCY-worthy state, NOT just literal RC failsafe: also true for "RTH"
+// (GPS Rescue). In Betaflight, GPS Rescue is entered as part of the failsafe
+// escalation on RX loss (and can also be switch-triggered), so an aircraft
+// autonomously returning home is exactly the situation Remote ID's EMERGENCY
+// status exists for, even on the tick where the FLIGHT_MODE string reads
+// "RTH" rather than "!FS!".
+static bool s_emergency = false;
 
 // Take-off/operator position: latched at ARM (or first fix as fallback).
 static bool   s_haveTakeoff = false;
@@ -342,11 +367,36 @@ static void RemoteID_sink(const uint8_t *frame, uint8_t len)
         while (i < 16 && i < plen && p[i]) { mode[i] = (char)p[i]; i++; }
         mode[i] = 0;
         s_haveMode = true;
-        // Betaflight: "!FS!" during failsafe; trailing "*" means disarmed.
-        s_failsafe = (strstr(mode, "!FS") != nullptr);
-        bool disarmed = (i > 0 && mode[i - 1] == '*');
-        bool armedNow = (i > 0) && !disarmed && !s_failsafe;
-        if (armedNow && !s_armed) latchTakeoff("arm");   // re-latch at the moment of arming
+        // Betaflight (src/main/telemetry/crsf.c, crsfFrameFlightMode()):
+        // "!FS!" alone = failsafe, "RTH" = GPS Rescue (also entered as part of
+        // Betaflight's own failsafe escalation on RX loss) - both EMERGENCY.
+        // Otherwise a disarmed-only suffix is appended to the mode string -
+        // '*' ready to arm, '!' arming disabled, '?' GPS rescue disabled -
+        // armed craft carry no suffix at all.
+        s_emergency = (strstr(mode, "!FS") != nullptr) || (strstr(mode, "RTH") != nullptr);
+
+        bool armedNow;
+        if (s_emergency) {
+            // The generic disarmed-suffix check does NOT apply to these two
+            // strings: Betaflight never appends a suffix while FAILSAFE_MODE
+            // is set, so "!FS!"'s trailing '!' is just the last character of
+            // that fixed 4-char string, not an "arming disabled" marker - and
+            // GPS Rescue only ever runs while armed. Treat both as armed
+            // (matches reality almost always) without re-deriving from the
+            // suffix, which would misread "!FS!" as disarmed.
+            armedNow = true;
+        } else {
+            bool disarmed = (i > 0) && (mode[i - 1] == '*' || mode[i - 1] == '!' || mode[i - 1] == '?');
+            armedNow = (i > 0) && !disarmed;
+        }
+        // Only latch on a clean, non-emergency arm edge. Excluding emergency
+        // here (on top of forcing armedNow=true above) matters once the
+        // emergency ends: s_armed is already true by then, so the edge
+        // (armedNow && !s_armed) does not re-fire and re-anchor the take-off/
+        // operator position to wherever the RTH/failsafe excursion happened
+        // to end - it stays at the original arm point, which is the whole
+        // point of latching at arm in the first place.
+        if (armedNow && !s_armed && !s_emergency) latchTakeoff("arm");
         s_armed = armedNow;
         break;
     }
@@ -410,11 +460,20 @@ static void fillUasData(ODID_UAS_Data *uas)
     strncpy(uas->BasicID[0].UASID, uasId, ODID_ID_SIZE);
     uas->BasicIDValid[0] = 1;
 
-    // Status: failsafe (from CRSF flight mode) -> EMERGENCY; else airborne when
-    // we have a fix. (No ground/airborne discriminator without an AGL/arm source
-    // beyond the arm latch, so a valid fix reads as airborne.)
-    uas->Location.Status          = s_failsafe ? ODID_STATUS_EMERGENCY
-                                    : (s_haveFix ? ODID_STATUS_AIRBORNE : ODID_STATUS_UNDECLARED);
+    // Status, from CRSF FLIGHT_MODE's arm state (priority order matches
+    // Betaflight's own: failsafe/RTH override everything else):
+    //   failsafe or RTH (GPS Rescue)   -> EMERGENCY
+    //   no GPS fix                     -> UNDECLARED (nothing to report)
+    //   have fix, mode telemetry seen, disarmed -> GROUND (was wrongly AIRBORNE
+    //     before this fix - a disarmed, GPS-locked drone sitting on the bench
+    //     or the field is not "airborne")
+    //   have fix, armed OR no mode telemetry ever seen -> AIRBORNE (fallback
+    //     for aircraft that don't send FLIGHT_MODE at all - best-effort, matches
+    //     the pre-existing default when ground/air can't be determined)
+    if (s_emergency)              uas->Location.Status = ODID_STATUS_EMERGENCY;
+    else if (!s_haveFix)          uas->Location.Status = ODID_STATUS_UNDECLARED;
+    else if (s_haveMode && !s_armed) uas->Location.Status = ODID_STATUS_GROUND;
+    else                          uas->Location.Status = ODID_STATUS_AIRBORNE;
     uas->Location.Direction       = s_headingDeg;
     uas->Location.SpeedHorizontal = s_speedMs;
     uas->Location.SpeedVertical   = s_vspeedMs;         // from vario/baro telemetry, else GPS-derived
@@ -433,10 +492,12 @@ static void fillUasData(ODID_UAS_Data *uas)
     uas->Location.TimeStamp       = INV_TIMESTAMP;      // no UTC time source on this data path - see file header
     uas->LocationValid            = s_haveFix ? 1 : 0;
 
-    // Operator/take-off location. We can't see the pilot's own GNSS from a
-    // drone-side sniffer, so we report the aircraft's take-off point (latched at
-    // arm) as OperatorLocationType TAKEOFF - spec-legal, and an approximation of
-    // the operator location (good when the pilot launches from where they stand).
+    // Operator/take-off location: a STATIC SNAPSHOT latched once at the clean
+    // arm edge (see file header "IMPORTANT" note above and the FLIGHT_MODE
+    // case for exactly when it (re)latches and when it deliberately doesn't -
+    // e.g. never mid-RTH/failsafe). Not the pilot's live position; treat any
+    // distance-from-pilot derived from it as approximate, accurate only near
+    // the moment of arming.
     uas->System.OperatorLocationType = ODID_OPERATOR_LOCATION_TYPE_TAKEOFF;
     uas->System.OperatorLatitude     = s_haveTakeoff ? s_takeoffLat : 0;
     uas->System.OperatorLongitude    = s_haveTakeoff ? s_takeoffLon : 0;

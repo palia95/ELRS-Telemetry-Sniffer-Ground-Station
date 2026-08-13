@@ -164,6 +164,66 @@ int main(void) {
     printf("PASS: firmware pack layout build (%d bytes, %u msgs, hdr=0x%02X) + Location decodes back\n",
            packlen, packbuf[2], packbuf[0]);
 
+    // --- FLIGHT_MODE armed/emergency classification, mirrors the EXACT
+    // expression in RemoteID_sink()'s CRSF_FRAMETYPE_FLIGHT_MODE case.
+    // Strings verified against Betaflight src/main/telemetry/crsf.c
+    // (crsfFrameFlightMode()): "!FS!"/RTH are EMERGENCY and force armed=1
+    // (the generic suffix heuristic does NOT apply to them - Betaflight never
+    // appends a suffix during failsafe, and GPS Rescue only runs while
+    // armed); otherwise disarmed appends '*'/'!'/'?', armed appends nothing.
+    struct { const char *mode; int expectArmed; int expectEmergency; } cases[] = {
+        {"ACRO",  1, 0}, {"AIR",  1, 0}, {"ANGL", 1, 0}, {"HOR",  1, 0},
+        {"ACRO*", 0, 0}, {"ACRO!", 0, 0}, {"ACRO?", 0, 0},
+        {"ALTH*", 0, 0}, {"POSH!", 0, 0},
+        {"!FS!",  1, 1},   // forced armed - the trailing '!' is NOT a disarmed suffix here
+        {"RTH",   1, 1},   // GPS Rescue - always armed in practice
+    };
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+        const char *mode = cases[i].mode;
+        int len = (int)strlen(mode);
+        int emergency = (strstr(mode, "!FS") != NULL) || (strstr(mode, "RTH") != NULL);
+        int armed;
+        if (emergency) {
+            armed = 1;
+        } else {
+            int disarmed = (len > 0) && (mode[len-1] == '*' || mode[len-1] == '!' || mode[len-1] == '?');
+            armed = (len > 0) && !disarmed;
+        }
+        if (armed != cases[i].expectArmed || emergency != cases[i].expectEmergency) {
+            printf("FAIL: FLIGHT_MODE '%s' classified armed=%d emergency=%d, expected armed=%d emergency=%d\n",
+                   mode, armed, emergency, cases[i].expectArmed, cases[i].expectEmergency);
+            return 1;
+        }
+    }
+    printf("PASS: FLIGHT_MODE armed/emergency classification (%zu cases, incl. RTH + '!'/'?' suffixes)\n",
+           sizeof(cases)/sizeof(cases[0]));
+
+    // --- Location.Status mapping, mirrors the EXACT if-chain in fillUasData().
+    struct { int emergency, haveFix, haveMode, armed; ODID_status_t expect; const char *why; } statusCases[] = {
+        {1, 1, 1, 1, ODID_STATUS_EMERGENCY, "failsafe/RTH always wins, even armed+fix"},
+        {1, 0, 0, 0, ODID_STATUS_EMERGENCY, "failsafe/RTH wins even with no fix"},
+        {0, 0, 1, 1, ODID_STATUS_UNDECLARED, "no fix -> nothing to report"},
+        {0, 1, 1, 0, ODID_STATUS_GROUND,     "disarmed, fix present, mode telemetry seen -> GROUND, not AIRBORNE"},
+        {0, 1, 1, 1, ODID_STATUS_AIRBORNE,   "armed, fix present -> AIRBORNE"},
+        {0, 1, 0, 0, ODID_STATUS_AIRBORNE,   "no FLIGHT_MODE telemetry ever -> best-effort AIRBORNE fallback"},
+    };
+    for (size_t i = 0; i < sizeof(statusCases)/sizeof(statusCases[0]); i++) {
+        int emergency = statusCases[i].emergency, haveFix = statusCases[i].haveFix;
+        int haveMode = statusCases[i].haveMode, armed = statusCases[i].armed;
+        ODID_status_t status;
+        if (emergency)                    status = ODID_STATUS_EMERGENCY;
+        else if (!haveFix)                status = ODID_STATUS_UNDECLARED;
+        else if (haveMode && !armed)      status = ODID_STATUS_GROUND;
+        else                              status = ODID_STATUS_AIRBORNE;
+        if (status != statusCases[i].expect) {
+            printf("FAIL: Status(emergency=%d haveFix=%d haveMode=%d armed=%d) = %d, expected %d (%s)\n",
+                   emergency, haveFix, haveMode, armed, status, statusCases[i].expect, statusCases[i].why);
+            return 1;
+        }
+    }
+    printf("PASS: Location.Status mapping (%zu cases, incl. GROUND vs AIRBORNE on disarmed)\n",
+           sizeof(statusCases)/sizeof(statusCases[0]));
+
     printf("\nALL CHECKS PASSED\n");
     return 0;
 }
