@@ -103,6 +103,14 @@ void RemoteID_SetOperatorId(const char *id);
 // for a host/GCS reading the debug serial. Empty value prints "[RID] OPID=".
 void RemoteID_ReportOperatorId(void);
 
+// Set the EU UA class - only 0 (Legacy/no class marking) or 1 (C0) are
+// accepted (self-built aircraft can't legitimately claim C1..C6, which are
+// manufacturer-declared classes). Default C0. Persists to NVS, mirrors the
+// BLE "C:<0|1>" write. Safe to call from the loop task.
+void RemoteID_SetClass(uint8_t classNum);
+// Print the current EU class as a machine-parseable line ("[RID] CLASS=C0" or "LEGACY").
+void RemoteID_ReportClass(void);
+
 #ifdef __cplusplus
 }
 #endif

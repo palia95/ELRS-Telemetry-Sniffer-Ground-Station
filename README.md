@@ -142,15 +142,21 @@ with success criteria), [`docs/04_flash_serial.md`](docs/04_flash_serial.md).
 
 Env `T3S3_Sniffer_2400_RX_RemoteID` re-purposes the BLE radio to **broadcast
 EASA/ASTM Direct Remote ID** (the drone "license-plate" beacon) sourced from
-the GPS the sniffer overhears — instead of streaming telemetry to a GCS. Both
-Legacy (BT4) and Long-Range (BT5 Coded PHY) advertisements, built + confirmed
-on-air.
+the telemetry the sniffer overhears (GPS, plus VARIO/BARO/FLIGHT_MODE when the
+aircraft sends them) — instead of streaming telemetry to a GCS. Both Legacy
+(BT4) and Long-Range (BT5 Coded PHY) advertisements, built + confirmed on-air.
+Derives vertical speed, height-above-takeoff, operator altitude, baro
+altitude, and emergency status from that telemetry — no extra sensor needed.
+Take-off/operator position latches at **arm**. Broadcast pauses entirely
+whenever there's no GPS fix, rather than sending a Basic-ID-only "ghost" drone.
 
 Your **Operator ID** (the EU UAS operator registration number — e.g. a 16-char
-`SWEabcdefghijklm`-style value; **use your own**, not this placeholder) is set
-once and stored in NVS, over BLE (write to characteristic `6E400002`) or over
-USB serial / the GCS (`O:<id>`). Full writeup, build/flash steps, Operator-ID
-format, and compliance status:
+`SWEabcdefghijklm`-style value; **use your own**, not this placeholder) and
+your **EU UA class** (`C0` or `Legacy`/no class marking — self-built aircraft
+can't claim the manufacturer-declared C1–C6 classes, so those aren't offered;
+default `C0`) are set once and stored in NVS, over BLE (write to
+characteristic `6E400002`) or over USB serial / the GCS (`O:<id>`, `C:0`/`C:1`).
+Full writeup, build/flash steps, Operator-ID format, and compliance status:
 [`docs/06_remoteid_broadcast.md`](docs/06_remoteid_broadcast.md).
 
 ## Running the ground station (GCS)

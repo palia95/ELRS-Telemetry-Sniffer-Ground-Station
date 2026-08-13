@@ -48,6 +48,7 @@ CSV_FIELDS = [
 
 _HEX_LINE = re.compile(r"\[CRSF\]\s*([0-9a-fA-F ]+)")
 _OPID_LINE = re.compile(r"\[RID\]\s*OPID=(.*)")   # Remote ID firmware: current Operator ID
+_CLASS_LINE = re.compile(r"\[RID\]\s*CLASS=(C0|LEGACY)")   # Remote ID firmware: EU class (only these two)
 _ADDR_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$|^[0-9A-Fa-f\-]{36}$")
 
 
@@ -191,6 +192,35 @@ class TransportManager:
             self._tx.put(b"O?\n")
             print("[gcs] requested operator ID over serial")
 
+    async def send_class(self, class_num):
+        """Set the EU UA class on the Remote ID firmware. Only 0 (Legacy - no
+        class marking) or 1 (C0) are valid - self-built aircraft can't
+        legitimately claim the manufacturer-declared C1..C6 classes, so the
+        firmware only accepts these two and the GCS only offers these two."""
+        try:
+            n = int(class_num)
+        except (TypeError, ValueError):
+            return
+        if n not in (0, 1):
+            return
+        payload = ("C:" + str(n) + "\n").encode()
+        label = "C0" if n == 1 else "Legacy"
+        if self.kind == "serial":
+            self._tx.put(payload)
+            print(f"[gcs] queued EU class {label} over serial")
+        elif self.kind == "ble" and self._ble_client is not None:
+            try:
+                await self._ble_client.write_gatt_char(NUS_RX, payload, response=False)
+                print(f"[gcs] sent EU class {label} over BLE")
+            except Exception as e:
+                print(f"[gcs] BLE class write failed: {e}")
+
+    async def request_class(self):
+        """Ask the device to echo its current EU class ("C?"). Serial only."""
+        if self.kind == "serial":
+            self._tx.put(b"C?\n")
+            print("[gcs] requested EU class over serial")
+
     def mark(self, status, desc=None):
         self.status = status
         if desc is not None:
@@ -270,6 +300,10 @@ def serial_reader(hub, port, baud, stop, mgr):
                         mo = _OPID_LINE.search(s_line)
                         if mo:
                             hub.push_operator_id(mo.group(1).strip())
+                            continue
+                        mc = _CLASS_LINE.search(s_line)
+                        if mc:
+                            hub.push_class(1 if mc.group(1) == "C0" else 0)
                             continue
                         m = _HEX_LINE.search(s_line)
                         if not m:
@@ -373,6 +407,11 @@ class Hub:
         msg = json.dumps({"type": "opid", "value": opid})
         self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_all(msg)))
 
+    def push_class(self, class_num):
+        """Thread-safe: broadcast the device's current EU class to WS clients."""
+        msg = json.dumps({"type": "class", "value": class_num})
+        self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_all(msg)))
+
     async def process_loop(self):
         while True:
             frame = await self.queue.get()
@@ -454,6 +493,10 @@ async def ws_handler(request):
                 await hub.mgr.send_operator_id(cmd.get("operator_id", ""))
             elif c == "get_operator_id":
                 await hub.mgr.request_operator_id()
+            elif c == "set_class":
+                await hub.mgr.send_class(cmd.get("class_num", 0))
+            elif c == "get_class":
+                await hub.mgr.request_class()
             elif c == "log":
                 if cmd.get("on"):
                     print(f"[gcs] logging -> {hub.logger.start()}")

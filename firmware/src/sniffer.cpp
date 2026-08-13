@@ -241,9 +241,10 @@ static void Sniffer_EmitLinkStats()
 static volatile bool s_ghostReady = false;
 
 // Accept "P:<phrase>\n" (set binding phrase) and, on the Remote ID build,
-// "O:<operator id>\n" (set the ODID Operator ID) on the debug serial (USBSerial)
-// so the host can configure over the cable, exactly like the BLE characteristics.
-// Non-blocking line accumulator; ignores anything that isn't a known command.
+// "O:<operator id>\n" / "O?" (Operator ID) and "C:<0..6>\n" / "C?" (EU class)
+// on the debug serial (USBSerial) so the host can configure over the cable,
+// exactly like the BLE characteristics. Non-blocking line accumulator;
+// ignores anything that isn't a known command.
 static void Sniffer_PollSerialCmd()
 {
     if (!SerialLogger) return;
@@ -269,6 +270,16 @@ static void Sniffer_PollSerialCmd()
             else if (idx >= 2 && line[0] == 'O' && line[1] == '?')
             {
                 RemoteID_ReportOperatorId();        // host/GCS reads back "[RID] OPID=<id>"
+            }
+            else if (idx >= 3 && line[0] == 'C' && line[1] == ':' && (line[2] == '0' || line[2] == '1'))
+            {
+                // "C:0"=Legacy (no class marking), "C:1"=C0 only - see REMOTEID_CLASS_*
+                // in devTransport_RemoteID.cpp for why the rest of C1..C6 isn't offered.
+                RemoteID_SetClass((uint8_t)(line[2] - '0'));   // runs in loop task -> NVS write is safe here
+            }
+            else if (idx >= 2 && line[0] == 'C' && line[1] == '?')
+            {
+                RemoteID_ReportClass();             // host/GCS reads back "[RID] CLASS=Cn"
             }
 #endif
             idx = 0;
