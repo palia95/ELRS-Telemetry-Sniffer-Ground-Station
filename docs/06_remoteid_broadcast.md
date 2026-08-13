@@ -41,6 +41,14 @@ it being airtight against every edge case a certified product would have to
 handle — hence the pragmatic, telemetry‑derived approach throughout this
 doc, with every simplification flagged rather than hidden (§9).
 
+**To be blunt about what this is not: this is not Remote ID for your FPV
+drone.** Don't treat a working broadcast as "my drone now has Remote ID" —
+it doesn't, not in the legal sense, and §9's gap list (no real registration,
+no UTC time source, self‑declared class, etc.) is exactly why. Think of it
+instead as a **side‑channel heads‑up to nearby drones and pilots** — closer
+in spirit to shouting "dropping in" at a shared flying site than to a
+certified transponder. Useful, worth having, not a compliance story.
+
 ---
 
 ## 1. What it does

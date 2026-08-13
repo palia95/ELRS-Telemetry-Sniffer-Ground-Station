@@ -143,7 +143,9 @@ with success criteria), [`docs/04_flash_serial.md`](docs/04_flash_serial.md).
 Built to get ahead of the incoming sub-250g Remote ID rules with a working
 (if unofficial and non-compliant — see `docs/06` §9) broadcast, and to give
 other nearby pilots local situational awareness: that we're flying, and
-roughly where.
+roughly where. **This is not Remote ID for your FPV drone** in the legal
+sense — think of it as a side-channel heads-up to nearby drones/pilots, not
+a compliance story.
 
 Env `T3S3_Sniffer_2400_RX_RemoteID` re-purposes the BLE radio to **broadcast
 EASA/ASTM Direct Remote ID** (the drone "license-plate" beacon) sourced from
