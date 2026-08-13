@@ -96,6 +96,13 @@ void GhostDisplay_Tick(uint32_t nowMs);
 void RemoteID_Transport_Init(void);
 void RemoteID_Tick(uint32_t nowMs);
 
+// Set the ODID Operator ID and persist to NVS (mirrors the BLE "O:" write).
+// Safe to call from the loop task (does an NVS flash write).
+void RemoteID_SetOperatorId(const char *id);
+// Print the current Operator ID as a machine-parseable line ("[RID] OPID=<id>")
+// for a host/GCS reading the debug serial. Empty value prints "[RID] OPID=".
+void RemoteID_ReportOperatorId(void);
+
 #ifdef __cplusplus
 }
 #endif

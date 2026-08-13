@@ -206,21 +206,87 @@ verify from a phone, not the build host.
 
 ## 8. Operator ID (the mandatory‑for‑EU field), set over BLE
 
-No display/keypad on the module, so the Operator ID is entered once from a phone
-and persisted to NVS:
+### 8.1 What value to enter (get / format your Operator ID)
 
-1. Connect to **`ELRS-RID-CFG`** (instance 2).
+The Operator ID broadcast by Remote ID is your **UAS operator registration
+number** — the number you get when you register as an *operator* with your
+national aviation authority (d‑flight.it, LBA, Transportstyrelsen, …). It is
+**not** the pilot competency certificate / "diploma" from the A1‑A3 or A2 online
+exam; that's a different credential and is not broadcast.
+
+Format (EU / EN 4709‑002, based on ANSI/CTA‑2063‑A) — 16 characters:
+
+```
+SWE abcdefghijkl m   ← illustrative placeholder, not a real registration
+└┬┘ └────┬─────┘ ┬
+ │       │       └ 1 checksum character (assigned, not computed by you)
+ │       └ 12-character operator portion
+ └ 3-letter country code (SWE, ITA, DEU, GBR, …)
+```
+
+- Your registration document may show the number with a trailing **`-xyz`
+  secret group** (3 characters after a dash). Those are **private** (used to
+  prove you're the real operator) and must **NOT** be broadcast — drop the dash
+  and everything after it.
+- Broadcast only the **16‑character public part** (country + 12 + checksum). It
+  fits the 20‑char ODID Operator‑ID field.
+
+### 8.2 Set it over BLE
+
+No display/keypad on the module, so the Operator ID is entered from a phone and
+persisted to NVS. On boot the module opens a **config window** (default 60 s,
+`REMOTEID_CONFIG_WINDOW_MS`) during which **only** the connectable config
+instance advertises — the ODID broadcast is held off so the phone can connect
+without Coded‑PHY / multi‑instance radio contention (running all instances at
+once starves the connection handshake and the connect fails):
+
+1. Power on / reset. Within the config window, connect to **`ELRS-RID-CFG`**
+   (instance 2).
 2. Nordic UART Service `6E400001‑…`.
 3. Write to characteristic **`6E400002`** (the write one), as **Text**:
-   `O:GBR-OP-123456` (your operator ID; no newline needed).
-4. Serial prints `[RID] operator ID set via BLE … saved to NVS`. It survives
-   reboots and is added to both broadcasts.
+   `O:SWEabcdefghijklm` (your 16‑char operator ID; no dash/secret, no newline).
+4. Serial prints `[RID] operator ID received … saving in loop task` then
+   `[RID] operator ID saved to NVS: '…'`. (The NVS flash write is done in the
+   loop task, not the BLE callback — a flash write inside a BLE callback
+   crashes the chip.)
+5. Disconnect. The window closes early (`config window closed (operator ID set)
+   -> ODID broadcast`) and instances 0 + 1 start broadcasting, now carrying the
+   Operator ID message.
 
-The config instance stops advertising the first time the sniffer sees the
-aircraft airborne (first GPS fix) — during flight the module is broadcast‑only.
-Because extended‑advertising NimBLE does **not** auto‑re‑advertise on
-disconnect, a small server callback re‑starts instance 2 after each disconnect
-(until airborne) so you get more than one connection attempt per boot.
+Persistence: the value is stored in NVS and reloaded on every boot
+(`[RID] loaded operator ID from NVS`), surviving power cycles and firmware
+reflashes (only a full chip erase clears it). The config window **reopens on
+every boot** even when an ID is already saved, so you can always reconnect to
+change it; if you don't connect, it closes on timeout and broadcasts the saved
+ID.
+
+### 8.3 Set / read over USB serial (and from the GCS)
+
+The Operator ID can also be set over the debug serial (USB‑CDC @ 460800),
+mirroring the existing `P:<phrase>` command — handy for bench config with no
+phone:
+
+- **Set:** send `O:<operator id>\n` → `[RID] operator ID set via serial, saved
+  to NVS`.
+- **Read:** send `O?\n` → `[RID] OPID=<operator id>` (empty if none set).
+- The firmware also emits `[RID] OPID=…` at boot and after any change (BLE or
+  serial), so a host can track the current value passively.
+
+The **GCS** (`gcs/`) exposes this in the Source panel: an *Operator ID* field
+with **Set** and **Read** buttons. It sends `O:`/`O?` over the active serial
+link and displays the device's current value (parsed from the `[RID] OPID=`
+line). Works over the serial transport; the Remote ID BLE config
+characteristic is write‑only, so read‑back is serial‑only. Note the GCS shows
+the *Operator ID*, not drone telemetry from it — the ODID broadcast itself is a
+separate BLE advertisement only a Remote ID scanner app decodes.
+
+> Implementation notes for the two bugs this flow fixes: (a) the config‑only
+> window exists because a connectable instance running alongside the Coded‑PHY
+> broadcast can't complete the connection handshake; (b) `s_adv->setCallbacks()`
+> **must** be called — NimBLE's `NimBLEExtAdvertising` leaves its callback
+> pointer uninitialized and dereferences it on the ADV_COMPLETE event that
+> fires when the connectable instance turns into a connection, crashing the
+> instant a phone connects.
 
 ---
 
