@@ -47,6 +47,7 @@ CSV_FIELDS = [
 ]
 
 _HEX_LINE = re.compile(r"\[CRSF\]\s*([0-9a-fA-F ]+)")
+_OPID_LINE = re.compile(r"\[RID\]\s*OPID=(.*)")   # Remote ID firmware: current Operator ID
 _ADDR_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$|^[0-9A-Fa-f\-]{36}$")
 
 
@@ -167,6 +168,29 @@ class TransportManager:
             except Exception as e:
                 print(f"[gcs] BLE phrase write failed: {e}")
 
+    async def send_operator_id(self, opid):
+        """Set the ODID Operator ID on the Remote ID firmware (mirrors "O:<id>")."""
+        opid = (opid or "").strip()
+        if not opid:
+            return
+        payload = ("O:" + opid + "\n").encode()
+        if self.kind == "serial":
+            self._tx.put(payload)
+            print(f"[gcs] queued operator ID over serial: {opid!r}")
+        elif self.kind == "ble" and self._ble_client is not None:
+            try:
+                await self._ble_client.write_gatt_char(NUS_RX, payload, response=False)
+                print(f"[gcs] sent operator ID over BLE: {opid!r}")
+            except Exception as e:
+                print(f"[gcs] BLE operator ID write failed: {e}")
+
+    async def request_operator_id(self):
+        """Ask the device to echo its current Operator ID ("O?"). Serial only -
+        the Remote ID BLE config characteristic is write-only (no read-back)."""
+        if self.kind == "serial":
+            self._tx.put(b"O?\n")
+            print("[gcs] requested operator ID over serial")
+
     def mark(self, status, desc=None):
         self.status = status
         if desc is not None:
@@ -242,7 +266,12 @@ def serial_reader(hub, port, baud, stop, mgr):
                     buf += chunk
                     while b"\n" in buf:
                         line, buf = buf.split(b"\n", 1)
-                        m = _HEX_LINE.search(line.decode("utf-8", "replace"))
+                        s_line = line.decode("utf-8", "replace")
+                        mo = _OPID_LINE.search(s_line)
+                        if mo:
+                            hub.push_operator_id(mo.group(1).strip())
+                            continue
+                        m = _HEX_LINE.search(s_line)
                         if not m:
                             continue
                         try:
@@ -339,6 +368,11 @@ class Hub:
     def submit(self, frame):
         self.loop.call_soon_threadsafe(self.queue.put_nowait, frame)
 
+    def push_operator_id(self, opid):
+        """Thread-safe: broadcast the device's current Operator ID to WS clients."""
+        msg = json.dumps({"type": "opid", "value": opid})
+        self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_all(msg)))
+
     async def process_loop(self):
         while True:
             frame = await self.queue.get()
@@ -416,6 +450,10 @@ async def ws_handler(request):
                 await hub.mgr.stop_current()
             elif c == "set_phrase":
                 await hub.mgr.send_phrase(cmd.get("phrase", ""))
+            elif c == "set_operator_id":
+                await hub.mgr.send_operator_id(cmd.get("operator_id", ""))
+            elif c == "get_operator_id":
+                await hub.mgr.request_operator_id()
             elif c == "log":
                 if cmd.get("on"):
                     print(f"[gcs] logging -> {hub.logger.start()}")

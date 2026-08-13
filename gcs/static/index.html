@@ -84,6 +84,12 @@
         <button id="phraseBtn">Set UID</button>
       </div>
       <div class="foot" id="phraseFoot" style="margin-top:2px"></div>
+      <div class="row">
+        <input id="opid" type="text" placeholder="Operator ID (Remote ID build)" autocomplete="off" spellcheck="false" maxlength="20"/>
+        <button id="opidBtn">Set</button>
+        <button id="opidRead">Read</button>
+      </div>
+      <div class="foot" id="opidFoot" style="margin-top:2px"></div>
       <div class="row" id="bleHdr" style="display:none">
         <span>BLE devices <span id="bleCount"></span></span>
         <span id="bleToggle">▾</span>
@@ -287,6 +293,11 @@ function connect(){
   ws.onmessage = ev => {
     const d = JSON.parse(ev.data);
     if(d.type==='sources'){ renderSources(d); return; }
+    if(d.type==='opid'){
+      $('opid').value = d.value || '';
+      $('opidFoot').textContent = d.value ? ('Current: '+d.value) : 'No Operator ID set on device.';
+      return;
+    }
     if(d.type!=='telemetry') return;
     lastRx = Date.now();
     if('tlm_age' in d) tlmAge = d.tlm_age;
@@ -311,6 +322,9 @@ function renderSources(d){
   if(s.status==='connected' && lastSrcStatus!=='connected'){
     const p=(localStorage.getItem(PHRASE_KEY)||'').trim();
     if(p) setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'set_phrase', phrase:p})); }catch(e){} }, 800);
+    // Ask the Remote ID firmware for its current Operator ID (serial only; a
+    // no-op on non-RemoteID builds, which simply never reply with OPID=).
+    setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_operator_id'})); }catch(e){} }, 1000);
   }
   lastSrcStatus = s.status;
   // serial dropdown (keep current selection if still valid)
@@ -362,6 +376,17 @@ function sendPhrase(){
 }
 $('phraseBtn').onclick = sendPhrase;
 $('phrase').addEventListener('keydown', e=>{ if(e.key==='Enter') sendPhrase(); });
+
+// ---- ODID Operator ID (Remote ID firmware) ----
+function sendOperatorId(){
+  const o = $('opid').value.trim();
+  if(!o){ $('opidFoot').textContent = 'Enter an Operator ID first.'; return; }
+  ws.send(JSON.stringify({cmd:'set_operator_id', operator_id:o}));
+  $('opidFoot').textContent = 'Sent — saving to device NVS…';
+}
+$('opidBtn').onclick = sendOperatorId;
+$('opid').addEventListener('keydown', e=>{ if(e.key==='Enter') sendOperatorId(); });
+$('opidRead').onclick = ()=>{ ws.send(JSON.stringify({cmd:'get_operator_id'})); $('opidFoot').textContent='Reading…'; };
 
 connect();
 redraw();

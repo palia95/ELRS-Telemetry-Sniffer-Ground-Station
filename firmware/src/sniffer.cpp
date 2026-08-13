@@ -240,9 +240,10 @@ static void Sniffer_EmitLinkStats()
 // Until then, Ghost_Loop() must not touch any of that state.
 static volatile bool s_ghostReady = false;
 
-// Accept a "P:<phrase>\n" command on the debug serial (USBSerial) so the host GCS
-// can set the binding phrase over the cable, exactly like the BLE RX characteristic
-// does. Non-blocking line accumulator; ignores anything that isn't a P: command.
+// Accept "P:<phrase>\n" (set binding phrase) and, on the Remote ID build,
+// "O:<operator id>\n" (set the ODID Operator ID) on the debug serial (USBSerial)
+// so the host can configure over the cable, exactly like the BLE characteristics.
+// Non-blocking line accumulator; ignores anything that isn't a known command.
 static void Sniffer_PollSerialCmd()
 {
     if (!SerialLogger) return;
@@ -259,6 +260,17 @@ static void Sniffer_PollSerialCmd()
                 DBGLN("[TLM RX] set phrase via serial");
                 Sniffer_SetUidFromPhrase(line + 2);
             }
+#if defined(GHOST_TRANSPORT_REMOTEID)
+            else if (idx >= 2 && line[0] == 'O' && line[1] == ':')
+            {
+                line[idx] = 0;
+                RemoteID_SetOperatorId(line + 2);   // runs in loop task -> NVS write is safe here
+            }
+            else if (idx >= 2 && line[0] == 'O' && line[1] == '?')
+            {
+                RemoteID_ReportOperatorId();        // host/GCS reads back "[RID] OPID=<id>"
+            }
+#endif
             idx = 0;
         }
         else if (idx < sizeof(line) - 1) { line[idx++] = ch; }

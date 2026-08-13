@@ -11,6 +11,18 @@
 // transports and repurposes the same BLE radio to advertise instead of
 // notify.
 //
+// Two lifecycle phases so the phone can actually connect:
+//
+//   CONFIG window (first REMOTEID_CONFIG_WINDOW_MS after boot, default 60 s):
+//     ONLY instance 2 advertises. The ODID broadcast is held off because
+//     running the Coded-PHY / multi-instance broadcast alongside a connectable
+//     instance starves the CONNECT_IND handshake and connections fail (this is
+//     the bug this phase split fixes). The window closes early once the
+//     Operator ID is written and the phone disconnects.
+//   BROADCAST phase (after the window): instance 2 is retired, instances 0+1
+//     broadcast the ODID messages. Pure connectionless broadcaster, matching
+//     ../../remote-id/PLAN.md §4's "not active during flight".
+//
 // Three advertising instances, per ASTM F3411 Annex A4 + one config-only:
 //   Instance 0: Bluetooth 4 Legacy Advertising (1M PHY). 31-byte legacy
 //               payload only fits ONE 25-byte ODID message per update, so
@@ -22,12 +34,9 @@
 //               (Basic ID + Location + System) in one update.
 //   Instance 2: Legacy, CONNECTABLE. A tiny GATT server (Nordic UART
 //               Service, same UUIDs/command style as devTransport_BLE.cpp's
-//               "P:<phrase>") for one-time Operator ID entry from a phone,
-//               since this module has no display/keypad. Persisted to NVS
-//               so it only needs setting once. Stops itself the first time
-//               the aircraft is seen airborne (first GPS fix) - once
-//               flying, this is a pure connectionless broadcaster, matching
-//               ../../remote-id/PLAN.md §4's "not active during flight".
+//               "P:<phrase>") for Operator ID entry from a phone, since this
+//               module has no display/keypad. Persisted to NVS. Only up during
+//               the CONFIG window (see above).
 // Legacy-only scanners (most consumer phones, all of iOS) see instance 0;
 // BT5-capable scanners (a subset of Android) can additionally pick up
 // instance 1's longer range. See ../../remote-id/PLAN.md for the
@@ -77,6 +86,17 @@ extern "C" {
 #ifndef REMOTEID_BROADCAST_PERIOD_MS
 #define REMOTEID_BROADCAST_PERIOD_MS 1000   // ASTM F3411: Location >= 1 Hz while airborne
 #endif
+#ifndef REMOTEID_CONFIG_WINDOW_MS
+// After boot, advertise ONLY the connectable config instance for this long so a
+// phone can reliably connect and set the Operator ID. The ODID broadcast
+// (Legacy + Coded PHY) does not start until this window closes - running the
+// Coded-PHY / multi-instance broadcast alongside a connectable instance starves
+// the CONNECT_IND handshake and connections fail. The window also ends early
+// once the Operator ID has been written and the phone disconnects. 60 s is well
+// inside the ground time before a flight (arming + GPS lock take longer), and
+// the sniffer has no GPS fix to broadcast this early anyway.
+#define REMOTEID_CONFIG_WINDOW_MS 60000
+#endif
 
 static const uint16_t ODID_ASTM_UUID16 = 0xFFFA;      // ASTM International
 static const uint8_t  ODID_AD_APP_CODE = 0x0D;         // AD Application Code = Open Drone ID
@@ -88,7 +108,25 @@ static const uint8_t  ODID_AD_APP_CODE = 0x0D;         // AD Application Code = 
 
 static NimBLEExtAdvertising *s_adv = nullptr;
 static uint8_t s_msgCounter = 0;
-static bool    s_cfgInstanceUp = false;   // instance 2 (connectable config) still advertising?
+
+// Two-phase lifecycle:
+//   RID_CONFIG    - boot: ONLY the connectable config instance (2) advertises,
+//                   so a phone can connect and set the Operator ID cleanly.
+//   RID_BROADCAST - config window closed: instance 2 down, ODID broadcast
+//                   (Legacy inst 0 + Coded PHY inst 1) runs.
+enum RIDPhase { RID_CONFIG, RID_BROADCAST };
+static RIDPhase       s_phase = RID_CONFIG;
+static uint32_t       s_bootMs = 0;
+static volatile bool  s_clientConnected = false;  // a phone is connected right now
+static volatile bool  s_configWriteDone = false;  // Operator ID written+saved this session
+
+// BLE host-task callbacks must NOT do flash I/O (NVS) or drive advertising -
+// a flash write while the BLE controller's ISRs run from flash crashes the
+// chip. So the callbacks only set these flags/buffer; RemoteID_Tick (loop
+// task) performs the actual NVS write and advertising restart.
+static volatile bool  s_pendingSave = false;              // onWrite -> Tick: persist operator ID
+static char           s_pendingOpId[ODID_ID_SIZE + 1] = {0};
+static volatile bool  s_pendingReadvertise = false;       // onDisconnect -> Tick: restart config adv
 
 // Operator ID: entered once over BLE from a phone (no display/keypad on this
 // module), persisted to NVS. Mandatory for real EU/EASA conformance (unlike
@@ -98,10 +136,9 @@ static char s_operatorId[ODID_ID_SIZE + 1] = {0};
 static bool s_haveOperatorId = false;
 
 // ---- Location state, fed by CRSF_FRAMETYPE_GPS frames sniffed off-air ----
-// (Declared here, above the callbacks, because RIDServerCallbacks reads
-// s_haveTakeoff. Written by the sink in the loop task; s_haveTakeoff is also
-// read from the BLE host task in onDisconnect - a plain aligned bool read,
-// atomic on this target.)
+// Written by the sink (loop task), read by fillUasData (loop task) - same
+// thread, no contention. s_haveTakeoff also latches the operator/take-off
+// position for the ASTM System message.
 static volatile bool s_haveFix = false;
 static double  s_lat = 0, s_lon = 0;          // degrees
 static float   s_altM = -1000;                // m (ODID "invalid" sentinel)
@@ -121,32 +158,33 @@ class RIDConfigCallbacks : public NimBLECharacteristicCallbacks {
         std::string opId = v.substr(2);
         while (!opId.empty() && (opId.back() == '\n' || opId.back() == '\r')) opId.pop_back();
         if (opId.length() > ODID_ID_SIZE) opId.resize(ODID_ID_SIZE);   // bound untrusted input
-        // Write the string fully BEFORE setting the "have it" flag: fillUasData()
-        // reads these from the loop task while this runs in the BLE host task, so
-        // the flag must never go true while the buffer is still half-written.
-        strncpy(s_operatorId, opId.c_str(), ODID_ID_SIZE);
-        s_operatorId[ODID_ID_SIZE] = 0;
-        s_haveOperatorId = !opId.empty();
-        s_prefs.putString("opid", s_operatorId);
-        DBGLN("[RID] operator ID set via BLE (%u chars), saved to NVS", (unsigned)opId.length());
+        // Buffer it; RemoteID_Tick (loop task) does the NVS flash write. Fill
+        // the string fully BEFORE raising the flag (loop task reads it once set).
+        strncpy(s_pendingOpId, opId.c_str(), ODID_ID_SIZE);
+        s_pendingOpId[ODID_ID_SIZE] = 0;
+        s_pendingSave = true;
+        DBGLN("[RID] operator ID received (%u chars), saving in loop task", (unsigned)opId.length());
     }
 };
 
-// Server callbacks: the ONLY reason these exist is to re-advertise the
-// connectable config instance after a disconnect. With CONFIG_BT_NIMBLE_EXT_ADV
-// enabled, NimBLEServer's built-in advertise-on-disconnect is compiled out
-// (it's `#if !CONFIG_BT_NIMBLE_EXT_ADV` in NimBLEServer.cpp), so without this
-// the operator would get exactly ONE connection per boot to set the ID.
+// Server callbacks: track connection state and, during the config window,
+// re-advertise the connectable config instance after a disconnect. With
+// CONFIG_BT_NIMBLE_EXT_ADV enabled, NimBLEServer's built-in
+// advertise-on-disconnect is compiled out (`#if !CONFIG_BT_NIMBLE_EXT_ADV` in
+// NimBLEServer.cpp), so without this the phone would get exactly ONE connection
+// per boot to set the ID.
 class RIDServerCallbacks : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer *) override { DBGLN("[RID] config client connected"); }
+    void onConnect(NimBLEServer *) override {
+        s_clientConnected = true;
+        DBGLN("[RID] config client connected");
+    }
     void onDisconnect(NimBLEServer *) override {
-        if (s_haveTakeoff) {   // airborne: config is closed for the flight
-            DBGLN("[RID] config client disconnected (airborne - staying broadcast-only)");
-            return;
-        }
-        bool ok = s_adv->start(2);   // adv data persists in the controller; just re-enable
-        s_cfgInstanceUp = ok;
-        DBGLN("[RID] config client disconnected, re-advertising config: %s", ok ? "ok" : "FAIL");
+        s_clientConnected = false;
+        // Defer the re-advertise to the loop task (don't drive advertising from
+        // the host-task callback). RemoteID_Tick restarts instance 2 only if
+        // we're still in the config window and the ID wasn't already saved.
+        s_pendingReadvertise = true;
+        DBGLN("[RID] config client disconnected");
     }
 };
 
@@ -315,9 +353,70 @@ static void setServiceDataInstance(uint8_t instance, const uint8_t *appPayload, 
     }
 }
 
+// Machine-parseable Operator ID line for a host/GCS reading the debug serial.
+void RemoteID_ReportOperatorId(void)
+{
+    DBGLN("[RID] OPID=%s", s_haveOperatorId ? s_operatorId : "");
+}
+
+// Set + persist the Operator ID (serial "O:" path). Loop-task context, so the
+// NVS flash write is safe to do directly here (unlike the BLE callback path).
+void RemoteID_SetOperatorId(const char *id)
+{
+    if (!id) return;
+    strncpy(s_operatorId, id, ODID_ID_SIZE);
+    s_operatorId[ODID_ID_SIZE] = 0;
+    s_haveOperatorId = (s_operatorId[0] != 0);
+    s_prefs.putString("opid", s_operatorId);
+    s_configWriteDone = true;   // configured -> let the config window close
+    DBGLN("[RID] operator ID set via serial, saved to NVS");
+    RemoteID_ReportOperatorId();
+}
+
 void RemoteID_Tick(uint32_t nowMs)
 {
     if (!s_adv) return;
+
+    // ---- Service work the BLE callbacks deferred to us (loop task) ----
+    // NVS flash write for the Operator ID: doing this here, not in onWrite,
+    // avoids a flash-write-in-BLE-callback crash.
+    if (s_pendingSave) {
+        s_pendingSave = false;
+        strncpy(s_operatorId, s_pendingOpId, ODID_ID_SIZE);
+        s_operatorId[ODID_ID_SIZE] = 0;
+        s_haveOperatorId = (s_operatorId[0] != 0);
+        s_prefs.putString("opid", s_operatorId);
+        s_configWriteDone = true;   // lets the config window close once the phone disconnects
+        DBGLN("[RID] operator ID saved to NVS (via BLE)");
+        RemoteID_ReportOperatorId();   // parseable line for a GCS on the serial
+    }
+    if (s_pendingReadvertise) {
+        s_pendingReadvertise = false;
+        // Only bother if still configuring and the ID wasn't already saved
+        // (if it was, we're about to transition to broadcast anyway).
+        if (s_phase == RID_CONFIG && !s_configWriteDone && !s_clientConnected) {
+            bool ok = s_adv->start(2);
+            DBGLN("[RID] re-advertising config after disconnect: %s", ok ? "ok" : "FAIL");
+        }
+    }
+
+    // ---- CONFIG phase: ONLY instance 2 (connectable config) is advertising.
+    // Do not broadcast ODID yet - a phone can't reliably connect while the
+    // Coded-PHY / multi-instance broadcast is contending for the radio. Close
+    // the window once it expires OR the Operator ID was written, but never
+    // while a phone is mid-session (don't cut off an in-flight write). ----
+    if (s_phase == RID_CONFIG) {
+        bool windowExpired = (nowMs - s_bootMs) >= REMOTEID_CONFIG_WINDOW_MS;
+        if ((windowExpired || s_configWriteDone) && !s_clientConnected) {
+            s_adv->stop(2);
+            s_phase = RID_BROADCAST;
+            DBGLN("[RID] config window closed (%s) -> ODID broadcast (Legacy + Coded PHY)",
+                  s_configWriteDone ? "operator ID set" : "timeout");
+        }
+        return;   // no ODID broadcast during config
+    }
+
+    // ---- BROADCAST phase ----
     static uint32_t last = 0;
     if (nowMs - last < REMOTEID_BROADCAST_PERIOD_MS) return;
     last = nowMs;
@@ -325,15 +424,6 @@ void RemoteID_Tick(uint32_t nowMs)
     // GPS telemetry is only as fresh as the last sniffed CRSF GPS frame;
     // if the sniffer lost lock on the RC link, stop claiming a fix.
     if (s_haveFix && (nowMs - s_lastFixMs) > 5000) s_haveFix = false;
-
-    // First fix seen == airborne (proxy, no arm signal on this data path -
-    // see sniffer.h). Retire the connectable config instance right then:
-    // once flying, this should be a pure broadcaster, not a connectable one.
-    if (s_haveTakeoff && s_cfgInstanceUp) {
-        s_adv->stop(2);
-        s_cfgInstanceUp = false;
-        DBGLN("[RID] airborne - config instance stopped, broadcast-only from here");
-    }
 
     ODID_UAS_Data uas;
     fillUasData(&uas);
@@ -389,14 +479,25 @@ void RemoteID_Transport_Init(void)
         s_haveOperatorId = true;
         DBGLN("[RID] loaded operator ID from NVS (%u chars)", savedOpId.length());
     } else {
-        DBGLN("[RID] no operator ID in NVS yet - write \"O:<id>\\n\" to the config characteristic before flying");
+        DBGLN("[RID] no operator ID in NVS yet - set via BLE 'O:' char or serial 'O:<id>'");
     }
+    RemoteID_ReportOperatorId();   // emit parseable OPID= line at boot for a GCS
 
     s_adv = NimBLEDevice::getAdvertising();
+    // MUST set ext-adv callbacks: NimBLEExtAdvertising's constructor leaves
+    // m_pCallbacks uninitialized, and NimBLE dereferences it on the
+    // ADV_COMPLETE event that fires when the connectable config instance
+    // terminates on a connection -> crash (LoadProhibited @ garbage ptr) the
+    // instant a phone connects. nullptr installs the library's default no-op
+    // handler (we don't need adv-stop/scan-req events).
+    s_adv->setCallbacks(nullptr);
+    s_bootMs = millis();
+    s_phase = RID_CONFIG;   // config window opens now; RemoteID_Tick closes it
 
-    // Instance 2: one-time connectable config GATT server (Operator ID entry).
-    // Instances 0/1 (the actual ODID broadcast) are (re)configured with real
-    // data on the first RemoteID_Tick().
+    // Instance 2: connectable config GATT server (Operator ID entry). This is
+    // the ONLY thing advertising during the config window - the ODID broadcast
+    // (instances 0/1) does not start until RemoteID_Tick transitions to
+    // RID_BROADCAST, so the phone can connect without radio contention.
     NimBLEServer *server = NimBLEDevice::createServer();
     server->setCallbacks(new RIDServerCallbacks());   // re-advertise config on disconnect
     NimBLEService *svc = server->createService(NUS_SERVICE);
@@ -413,8 +514,9 @@ void RemoteID_Transport_Init(void)
     cfgScanResp.setCompleteServices(NimBLEUUID(NUS_SERVICE));
     s_adv->setInstanceData(2, cfgAdv);
     s_adv->setScanResponseData(2, cfgScanResp);
-    s_cfgInstanceUp = s_adv->start(2);
-    DBGLN("[RID] config instance (connectable, 'ELRS-RID-CFG') %s", s_cfgInstanceUp ? "up" : "FAILED TO START");
+    bool cfgUp = s_adv->start(2);
+    DBGLN("[RID] config instance (connectable, 'ELRS-RID-CFG') %s - open %us for Operator ID entry",
+          cfgUp ? "up" : "FAILED TO START", (unsigned)(REMOTEID_CONFIG_WINDOW_MS / 1000));
 
     Ghost_Transport_Register(&RemoteID_sink);
 }
