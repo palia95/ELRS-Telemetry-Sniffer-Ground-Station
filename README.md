@@ -138,6 +138,15 @@ guides: [`docs/02_build_flash_guide.md`](docs/02_build_flash_guide.md),
 [`docs/03_bringup_runbook.md`](docs/03_bringup_runbook.md) (phased bring-up
 with success criteria), [`docs/04_flash_serial.md`](docs/04_flash_serial.md).
 
+### Alternative firmware: broadcast EASA Direct Remote ID
+
+Env `T3S3_Sniffer_2400_RX_RemoteID` re-purposes the BLE radio to **broadcast
+EASA/ASTM Direct Remote ID** (the drone "license-plate" beacon) sourced from
+the GPS the sniffer overhears — instead of streaming telemetry to a GCS. Both
+Legacy (BT4) and Long-Range (BT5 Coded PHY) advertisements, Operator-ID entry
+over BLE, built + confirmed on-air. Full writeup, build/flash steps, and
+compliance status: [`docs/06_remoteid_broadcast.md`](docs/06_remoteid_broadcast.md).
+
 ## Running the ground station (GCS)
 
 **macOS native app:**

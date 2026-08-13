@@ -28,9 +28,14 @@
 // ---- Front-end / PA RF switch (T3-S3 rev 1.1/1.2 SX1280 PA) ----
 // RXEN=21, TXEN=10. ELRS drives RXEN HIGH during receive; without these the
 // LNA/RX path is never enabled and the radio is deaf. (Bare-SX1280 v1.0 with
-// no FEM: set both to UNDEF_PIN.)
+// no FEM: set both to UNDEF_PIN — override with -D GPIO_PIN_RX_ENABLE=UNDEF_PIN
+// / -D GPIO_PIN_TX_ENABLE=UNDEF_PIN in the env, e.g. the non-PA V1 board.)
+#ifndef GPIO_PIN_RX_ENABLE
 #define GPIO_PIN_RX_ENABLE  21
+#endif
+#ifndef GPIO_PIN_TX_ENABLE
 #define GPIO_PIN_TX_ENABLE  10
+#endif
 
 // ---- UART (USB-CDC is primary on S3; these are the header pins) ----
 #define GPIO_PIN_RCSIGNAL_RX 44

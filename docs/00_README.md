@@ -35,20 +35,25 @@ telemetry-sniffer/
 │  ├─ 02_build_flash_guide.md   ← general build/flash + layout
 │  ├─ 03_bringup_runbook.md     ← phased bench bring-up with success criteria
 │  ├─ 04_flash_serial.md        ← build & flash the serial-debug build
-│  └─ 05_working_config_and_gotchas.md ← READ FIRST: known-good config + every fix
+│  ├─ 05_working_config_and_gotchas.md ← READ FIRST: known-good config + every fix
+│  └─ 06_remoteid_broadcast.md  ← ALTERNATIVE firmware: broadcast EASA Remote ID over BLE
 ├─ firmware/
 │  ├─ build.sh                              ← one command: integrate + patch + build
 │  ├─ integrate.py                          ← copies sources + patches rx_main (idempotent)
 │  ├─ rx_main_ghost.patch                   ← verified unified diff (git apply / patch -p1)
 │  ├─ hardware/lilygo_t3s3_sniffer_rx.json  ← runtime pin layout (recommended)
 │  ├─ target/T3S3_Sniffer_RX.h              ← static pin header (fallback)
-│  ├─ targets/t3s3_sniffer.ini              ← PlatformIO envs (…_Serial and …_Wireless)
+│  ├─ targets/t3s3_sniffer.ini              ← PlatformIO envs (…_Serial, …_BLE, …_Wireless, …_RemoteID)
+│  ├─ third_party/LICENSE-opendroneid-core-c ← Apache-2.0 (vendored ODID lib)
+│  ├─ test/test_remoteid.c                  ← host unit test for the Remote ID encode path
 │  └─ src/
 │     ├─ sniffer.h / sniffer.cpp            ← core: UID-from-phrase, TLM capture, reassembly
 │     ├─ rx_main.patch.md                   ← human-readable explanation of the 6 edits
 │     ├─ devTransport_Serial.cpp            ← serial debug output (decoded + raw CRSF hex)
 │     ├─ devTransport_BLE.cpp               ← BLE GATT (Nordic UART Service) — done, working
-│     └─ devTransport_WiFiUDP.cpp           ← WiFi UDP broadcast of CRSF frames — deferred
+│     ├─ devTransport_WiFiUDP.cpp           ← WiFi UDP broadcast of CRSF frames — deferred
+│     ├─ devTransport_RemoteID.cpp          ← ALT: broadcast EASA/ASTM Remote ID over BLE (see docs/06)
+│     └─ opendroneid.h / opendroneid.c      ← vendored opendroneid-core-c (Apache-2.0, unmodified)
 ├─ gcs/                                     ← Python ground-station app (macOS native + browser)
 └─ android/
    └─ app/…                                 ← Compose app skeleton: CRSF parser + BLE client + UI

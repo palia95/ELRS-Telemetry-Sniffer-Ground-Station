@@ -89,6 +89,13 @@ void WiFiUDP_Transport_Init(void);
 void GhostDisplay_Init(void);
 void GhostDisplay_Tick(uint32_t nowMs);
 
+// EASA/ASD-STAN Direct Remote ID BLE broadcaster (devTransport_RemoteID.cpp).
+// Alternative to BLE_Transport_Init: broadcasts advertisements instead of
+// running a GATT server to a GCS. Ticked once per loop; internally rate-limits
+// to REMOTEID_BROADCAST_PERIOD_MS.
+void RemoteID_Transport_Init(void);
+void RemoteID_Tick(uint32_t nowMs);
+
 #ifdef __cplusplus
 }
 #endif
