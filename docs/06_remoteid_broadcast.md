@@ -12,6 +12,16 @@ connectionless advertisement, not a GATT stream.
 > correctly in nRF Connect. Not yet validated end‑to‑end against a Remote ID
 > scanner app with a live GPS lock, and **not a legal compliance claim** — see §9.
 
+> **ELRS version disclaimer:** this broadcast only has data to send once the
+> underlying sniffer locks onto and decodes the target aircraft's telemetry —
+> so it inherits the base sniffer's ELRS‑version dependency (top‑level
+> [`../README.md`](../README.md) § Compatibility). Anchor‑verified against the
+> full **ELRS 3.5.x/3.6.x** tag range. **ELRS 4.x is not a "just recompile"
+> situation** — 4.x restructured the OTA packet‑type scheme itself
+> (`PACKET_TYPE_TLM` no longer exists in `rx_main.cpp`), so the build fails
+> outright against a 4.x checkout, and a real protocol‑level port would be
+> needed before this works against a drone/handset running ELRS 4.x.
+
 Companion design doc with the wider rationale (standalone‑module vs this
 in‑sniffer path, dual‑PHY receiver‑compatibility analysis, PCB notes):
 [`../../remote-id/PLAN.md`](../../remote-id/PLAN.md).

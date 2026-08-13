@@ -96,7 +96,25 @@ is logged in [`docs/05_working_config_and_gotchas.md`](docs/05_working_config_an
 
 ## Compatibility
 
-- **ExpressLRS 3.5.6** (pinned tag) — not tested against other versions.
+- **ExpressLRS 3.5.6** (pinned tag, what's actually flashed/tested end-to-end)
+  — **3.5.x and 3.6.x should also work**: `firmware/integrate.py`'s patch is
+  anchor-based (exact-string matches against `rx_main.cpp`), and checked
+  2026-08-13 against every tagged 3.x release (3.5.0–3.6.4, the full 3.x tag
+  range — there is no earlier tagged 3.x) — all 8 anchors match on both ends
+  (3.5.6 and 3.6.4), so the same patch should apply cleanly across that whole
+  line. Not runtime-tested beyond 3.5.6 though, only anchor-verified.
+  **ExpressLRS 4.x is a different story — do not assume it "just needs a
+  recompile":** the same check against 4.0.0/4.1.0 shows the patch anchor
+  that hooks telemetry capture (`case PACKET_TYPE_TLM:`) is **gone** —
+  `PACKET_TYPE_TLM` doesn't appear anywhere in `rx_main.cpp` on 4.x anymore.
+  ELRS 4.x restructured the OTA packet-type scheme itself (the switch in
+  `ProcessRFPacket` now only handles `RCDATA`/`SYNC`/`DATA`), not just
+  reworded the same logic. That means `integrate.py` **fails loudly** on 4.x
+  (anchor-count mismatch, aborts rather than silently mis-patching), and a
+  real port — re-deriving `docs/01_protocol_reference.md`'s tables against
+  4.x's actual OTA packet layout, not just patching around the missing line —
+  would be needed before this works with an ELRS 4.x TX/RX pair. **If your
+  drone/handset run ELRS 4.x, this project as-is will not build against it.**
 - **LILYGO T3-S3, PA/FEM (SX1280PA) revision.** The non-PA v1.0 variant uses
   different antenna-switch pins; adjust `firmware/hardware/*.json` accordingly
   and re-verify.
