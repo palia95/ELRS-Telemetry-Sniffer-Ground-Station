@@ -18,6 +18,31 @@ in‑sniffer path, dual‑PHY receiver‑compatibility analysis, PCB notes):
 
 ---
 
+## 0. Why this exists
+
+Two motivations, neither of them "get certified":
+
+- **Get ahead of the incoming sub‑250g rules.** Remote ID requirements are
+  expanding to cover lighter aircraft than they used to, including builds
+  that have so far flown under that radar. This is a practical, working
+  broadcast built *before* that requirement lands on a sub‑250g self‑build —
+  an effective solution, but an **unofficial and non‑compliant** one (see §9
+  and §11 of the companion plan). It is not a substitute for the actual
+  conformity assessment once that becomes mandatory for this airframe class.
+- **Local situational awareness for other pilots.** Independent of any
+  regulation, broadcasting "there's a drone here, at this position" is
+  useful on its own: it lets other people flying nearby — at the same field,
+  in the same airspace — know we're up and roughly where, the same way a
+  transponder helps full‑scale aircraft see each other. That's a safety
+  benefit regardless of whether it satisfies a legal requirement.
+
+Both goals are served by getting the broadcast *working and useful*, not by
+it being airtight against every edge case a certified product would have to
+handle — hence the pragmatic, telemetry‑derived approach throughout this
+doc, with every simplification flagged rather than hidden (§9).
+
+---
+
 ## 1. What it does
 
 - Rides the ELRS link passively exactly like the normal sniffer (§ `00_README.md`).
