@@ -79,17 +79,45 @@ certified transponder. Useful, worth having, not a compliance story.
   - **Operator/take‑off altitude** — the same latched take‑off altitude.
   - **Baro altitude** — passed through when `BARO_ALTITUDE` telemetry is
     present; left "unknown" otherwise (optional field).
-  - **Emergency status** — `CRSF FLIGHT_MODE` decoded Betaflight‑style
-    (`!FS!` = failsafe) → `ODID_STATUS_EMERGENCY`. Best‑effort — not every
-    FC/mode string follows this convention.
+  - **Status** — decoded from CRSF `FLIGHT_MODE`, verified against Betaflight's
+    actual source (`src/main/telemetry/crsf.c`), not just assumed:
+    - `!FS!` (failsafe) or `RTH` (GPS Rescue — itself part of Betaflight's own
+      failsafe escalation on RX loss) → `ODID_STATUS_EMERGENCY`.
+    - Disarmed + a GPS fix → `ODID_STATUS_GROUND` (a disarmed, GPS‑locked
+      drone sitting on the bench is not "airborne" — this was a real gap in
+      an earlier version, which read any valid fix as airborne regardless of
+      arm state).
+    - Armed + a GPS fix, **or** no `FLIGHT_MODE` telemetry at all → `AIRBORNE`
+      (best‑effort fallback for FCs that don't send flight‑mode telemetry).
+    - Disarmed/armed itself is read from the mode string's trailing
+      character: no suffix = armed; `*`/`!`/`?` = disarmed (ready‑to‑arm /
+      arming‑disabled / GPS‑rescue‑disabled respectively — all three, not
+      just `*`, an earlier version missed `!`/`?` and would misclassify
+      e.g. `"ACRO!"` as armed). The suffix rule does **not** apply to `!FS!`
+      or `RTH` — Betaflight never appends a suffix during failsafe, and GPS
+      Rescue only ever runs while armed, so both are treated as armed
+      outright rather than suffix‑parsed.
   - **Take‑off/operator position** — latched at the moment `FLIGHT_MODE`
-    reports **ARMED** (falls back to "first GPS fix" if no flight‑mode
-    telemetry ever arrives, and self‑heals if we join mid‑flight already‑armed
-    before a fix exists). We have no visibility into the *pilot's* own GNSS
-    from a drone‑side sniffer, so this is reported as
-    `OperatorLocationType = TAKEOFF`, not `LIVE_GNSS` — spec‑legal, and a
-    good approximation when the pilot launches from where they're standing;
-    not accurate for long‑range/repositioned flying.
+    reports a **clean armed transition** (falls back to "first GPS fix" if no
+    flight‑mode telemetry ever arrives, and self‑heals if we join mid‑flight
+    already‑armed before a fix exists). Deliberately does **not** re‑latch
+    across a mid‑flight `RTH`/failsafe excursion — once the emergency clears
+    and the mode string returns to a normal armed state, no new arm‑edge
+    fires (the emergency period is treated as "still armed" throughout), so
+    the reference point stays anchored to the original arm location instead
+    of jumping to wherever the excursion happened to end.
+    
+    **This is a one‑time snapshot, not the pilot's live position — read this
+    before trusting any "distance from pilot" a receiver computes from it.**
+    We have no visibility into the *pilot's* own GNSS from a drone‑side
+    sniffer, so it's reported as `OperatorLocationType = TAKEOFF`, not
+    `LIVE_GNSS`. It goes stale the moment the pilot moves after arming
+    (walking a track between race gates, repositioning after launch, handing
+    off the controller) or the flight goes long‑range. There's no field in
+    the spec to flag "this is stale" (unlike `Location`, `System` has no
+    operator‑location accuracy field) — so a receiver has no way to know how
+    old this position is. Treat it as approximate, accurate only near the
+    moment of arming.
 - **No telemetry, no broadcast.** Without a GPS fix there is nothing real to
   report, so instances 0/1 stay off the air rather than broadcast a
   Basic‑ID‑only "ghost" drone — see §2.
@@ -412,8 +440,8 @@ Broadcasting valid frames ≠ EASA conformance. Current state:
 | Location **vertical speed** | ✅ derived — from VARIO/BARO telemetry when present, else from successive GPS altitude samples. |
 | Location **height above take‑off** | ✅ derived — current altitude minus the altitude latched at take‑off. |
 | Location **baro altitude** | ✅ pass‑through when the aircraft sends `BARO_ALTITUDE` telemetry; "unknown" otherwise (optional field either way). |
-| Location **status = EMERGENCY** | ✅ derived, best‑effort — from CRSF `FLIGHT_MODE` (`!FS!` = failsafe convention). Not every FC/mode string follows it. |
-| System (operator/take‑off position) | ✅ sent once take‑off is latched (now at **ARM**, via `FLIGHT_MODE`, not just first fix — §1). |
+| Location **status** (GROUND/AIRBORNE/EMERGENCY) | ✅ derived, best‑effort, verified against Betaflight's actual source — from CRSF `FLIGHT_MODE` (`!FS!`/`RTH` → EMERGENCY; disarmed+fix → GROUND; armed+fix → AIRBORNE). Not every FC/mode string follows this convention. |
+| System (operator/take‑off position) | ✅ sent once take‑off is latched (at a **clean armed transition**, via `FLIGHT_MODE`, not just first fix, and not re‑latched across an RTH/failsafe excursion — §1). **One‑time snapshot, not live — see §1 for the distance‑from‑pilot caveat.** |
 | System **operator altitude** | ✅ derived — the same latched take‑off altitude. |
 | System **EU classification** | ✅ user‑configurable, **C0 or Legacy only** (§8.4), default C0. Not the full C1–C6 range — see §8.4 for why. |
 | Operator ID | ✅ sent when set (§8). **Mandatory for EU/EASA**, optional in base ASTM. |
@@ -438,8 +466,23 @@ parse/scaling and the ODID encode↔decode round‑trip:
 ```bash
 cd firmware/test
 cc -std=c11 test_remoteid.c ../src/opendroneid.c -I../src -lm -o /tmp/t && /tmp/t
-# -> ALL CHECKS PASSED  (Location/BasicID/System/OperatorID round-trip, pack layout)
+# -> ALL CHECKS PASSED  (GPS parse, ODID round-trip, pack layout, FLIGHT_MODE
+#    armed/emergency classification, Location.Status mapping)
 ```
+
+The FLIGHT_MODE and Status test blocks mirror the exact expressions in
+`devTransport_RemoteID.cpp`'s `RemoteID_sink()`/`fillUasData()` line for line
+— they exist specifically because those expressions have already had two real
+bugs caught this way: the disarmed‑suffix check originally missed `!`/`?`
+(only checked `*`), and `Location.Status` originally ignored arm state
+entirely (any valid fix read as AIRBORNE, even disarmed‑on‑the‑ground).
+
+**GCS parity:** `gcs/crsf.py`'s own CRSF decoder had a matching gap — it
+didn't extract vertical speed from the combined 4‑byte `BARO_ALTITUDE` frame
+(altitude + vspeed together) the way the firmware does, silently dropping
+data it had already parsed most of. Fixed to match; verified with an inline
+round‑trip (build a frame, decode it, check `vario_ms` appears iff the
+payload is the 4‑byte combined variant).
 
 ---
 

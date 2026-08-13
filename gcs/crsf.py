@@ -102,6 +102,12 @@ def parse_frame(frame: bytes, check_crc: bool = True):
             v = _u16(p, 0)
             # best-effort: high bit => meters, else decimeters with -10000 offset
             out = {"baro_alt_m": (v & 0x7FFF) if (v & 0x8000) else (v / 10.0 - 1000)}
+            # Some aircraft send the combined 4-byte baro+vario variant (altitude
+            # + vertical speed in the same frame) instead of a separate VARIO
+            # frame - extract it here too, or it's silently dropped even though
+            # it's already in the payload we successfully parsed.
+            if len(p) >= 4:
+                out["vario_ms"] = _s16(p, 2) / 100.0
         elif ftype == LINK_STATISTICS and len(p) >= 10:
             out = {
                 "link_rssi1_dbm": -p[0],
