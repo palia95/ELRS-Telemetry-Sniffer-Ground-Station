@@ -118,6 +118,19 @@ certified transponder. Useful, worth having, not a compliance story.
     operator‑location accuracy field) — so a receiver has no way to know how
     old this position is. Treat it as approximate, accurate only near the
     moment of arming.
+
+    **Not persisted, by deliberate choice — not fixed** (2026‑08‑13): unlike
+    the Operator ID and EU class (both NVS‑backed), the take‑off snapshot is
+    plain RAM state. A restart of **this module** (not the aircraft's — a
+    brownout, watchdog reset, reflash) mid‑flight doesn't just lose it, it
+    silently **relatches to a wrong position**: the armed‑state tracking also
+    resets, so the next `FLIGHT_MODE` frame showing "armed" looks like a
+    fresh arm edge and captures wherever the aircraft happens to be at that
+    moment — not the real launch point — with nothing to signal this
+    happened. Accepted trade‑off: NVS persistence would need a reliable way
+    to tell "sniffer hiccup mid‑flight" from "genuinely new flight after a
+    full power‑down" (reusing a stale take‑off point from the *previous*
+    flight would be worse than losing it), which isn't free.
 - **No telemetry, no broadcast.** Without a GPS fix there is nothing real to
   report, so instances 0/1 stay off the air rather than broadcast a
   Basic‑ID‑only "ghost" drone — see §2.

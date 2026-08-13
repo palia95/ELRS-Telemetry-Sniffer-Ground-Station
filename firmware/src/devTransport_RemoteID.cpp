@@ -53,6 +53,23 @@
 // System message as approximate at best, accurate only near the moment of
 // arming, and not something to rely on for real separation/BVLOS decisions.
 //
+// NOT PERSISTED, BY DESIGN CHOICE (documented, not fixed - see chat
+// 2026-08-13): s_haveTakeoff/s_takeoffLat/s_takeoffLon/s_takeoffAltM are
+// plain RAM state, unlike the Operator ID and EU class (both NVS-backed).
+// A sniffer restart - not the aircraft's, THIS MODULE'S - clears them. If
+// that restart happens mid-flight (brownout, watchdog reset, reflash) while
+// the aircraft is already armed, the take-off reference is not just lost,
+// it is silently WRONG afterward: s_armed also resets to false, so the very
+// next FLIGHT_MODE frame showing "armed" looks like a fresh disarmed->armed
+// edge and re-latches to wherever the aircraft happens to be at that
+// moment - not the real launch point - with no signal to anyone that this
+// happened. Accepted trade-off, not a bug to silently work around: NVS
+// persistence would need a reliable way to distinguish "sniffer hiccup,
+// mid-flight" from "genuinely new flight after a full power-down" (a stale
+// take-off point from the previous flight would be worse than none), which
+// isn't free - revisit if this restart scenario turns out to matter in
+// practice.
+//
 // Two lifecycle phases so the phone can actually connect:
 //
 //   CONFIG window (first REMOTEID_CONFIG_WINDOW_MS after boot, default 60 s):
