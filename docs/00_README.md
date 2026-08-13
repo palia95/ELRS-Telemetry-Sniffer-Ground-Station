@@ -36,7 +36,8 @@ telemetry-sniffer/
 │  ├─ 03_bringup_runbook.md     ← phased bench bring-up with success criteria
 │  ├─ 04_flash_serial.md        ← build & flash the serial-debug build
 │  ├─ 05_working_config_and_gotchas.md ← READ FIRST: known-good config + every fix
-│  └─ 06_remoteid_broadcast.md  ← ALTERNATIVE firmware: broadcast EASA Remote ID over BLE
+│  ├─ 06_remoteid_broadcast.md  ← ALTERNATIVE firmware: broadcast EASA Remote ID over BLE
+│  └─ 07_remoteid_field_test_checklist.md ← real-drone field test checklist for the above
 ├─ firmware/
 │  ├─ build.sh                              ← one command: integrate + patch + build
 │  ├─ integrate.py                          ← copies sources + patches rx_main (idempotent)

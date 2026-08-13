@@ -506,3 +506,11 @@ Boot log prints `Use RX pin: 21 / TX pin: 10` — the flashed
 power_txen:10`, although this project earlier recorded the board as **V1
 non‑PA** with those removed. Not fatal (radio inits fine), but confirm the
 board revision; if truly non‑PA, drop those two keys from the layout JSON.
+
+---
+
+## 12. Next: real-drone field testing
+
+Everything above is bench‑verified only (synthetic test cases, no real
+GPS/link). [`07_remoteid_field_test_checklist.md`](07_remoteid_field_test_checklist.md)
+is the phased checklist for the first real end‑to‑end test.
