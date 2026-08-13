@@ -4,12 +4,36 @@
 // Alternative to devTransport_BLE.cpp: instead of streaming reassembled
 // CRSF telemetry to a GCS phone app over a GATT connection, this transport
 // broadcasts ASTM F3411 / ASD-STAN EN 4709-002 "Direct Remote ID" messages
-// as connectionless BLE advertisements, sourced from the GPS telemetry the
-// sniffer already overhears on the ELRS link (CRSF_FRAMETYPE_GPS). No GATT
-// server, no phone pairing, no separate GPS tap on the airframe - this
-// module rides passively on the RC link exactly like the other Ghost
-// transports and repurposes the same BLE radio to advertise instead of
-// notify.
+// as connectionless BLE advertisements, sourced from the telemetry the
+// sniffer already overhears on the ELRS link - GPS (0x02), and if the
+// aircraft sends them, VARIO (0x07) / BARO_ALTITUDE (0x09) / FLIGHT_MODE
+// (0x21). No GATT server, no phone pairing, no separate GPS tap on the
+// airframe - this module rides passively on the RC link exactly like the
+// other Ghost transports and repurposes the same BLE radio to advertise
+// instead of notify.
+//
+// Derived fields (no separate sensor needed):
+//   - Vertical speed: from VARIO/BARO telemetry when the aircraft sends it,
+//     else differentiated from successive GPS altitude samples.
+//   - Height above take-off: current geodetic altitude minus the altitude
+//     latched at take-off (see below).
+//   - Operator/take-off altitude: the same latched take-off altitude.
+//   - Baro altitude: passed through when BARO_ALTITUDE telemetry is present;
+//     "unknown" otherwise (Location.AltitudeBaro is optional in the spec).
+//   - Emergency status: CRSF FLIGHT_MODE decoded Betaflight-style ("!FS!" =
+//     failsafe) -> ODID_STATUS_EMERGENCY. Best-effort - not every FC/mode
+//     string follows this convention.
+// WAIT state: instances 0/1 only broadcast while a GPS fix exists (or is
+// fresh - stale >5s = treated as lost). No fix = nothing real to report, so
+// rather than broadcast a Basic-ID-only "ghost" drone with an undeclared
+// position, the ODID broadcast is paused entirely until a fix (re)appears.
+//
+// Take-off/operator position is latched at the moment FLIGHT_MODE reports
+// ARMED (falls back to "first GPS fix" if no flight-mode telemetry ever
+// arrives). We have no visibility into the pilot's own GNSS from a drone-side
+// sniffer, so this is reported as OperatorLocationType TAKEOFF, not LIVE_GNSS
+// - spec-legal, and a good approximation when the pilot launches from where
+// they're standing; not accurate for long-range/repositioned flying.
 //
 // Two lifecycle phases so the phone can actually connect:
 //
@@ -127,6 +151,7 @@ static volatile bool  s_configWriteDone = false;  // Operator ID written+saved t
 static volatile bool  s_pendingSave = false;              // onWrite -> Tick: persist operator ID
 static char           s_pendingOpId[ODID_ID_SIZE + 1] = {0};
 static volatile bool  s_pendingReadvertise = false;       // onDisconnect -> Tick: restart config adv
+static volatile int   s_pendingClass = -1;                // onWrite -> Tick: persist EU class (-1 = none)
 
 // Operator ID: entered once over BLE from a phone (no display/keypad on this
 // module), persisted to NVS. Mandatory for real EU/EASA conformance (unlike
@@ -135,7 +160,26 @@ static Preferences s_prefs;
 static char s_operatorId[ODID_ID_SIZE + 1] = {0};
 static bool s_haveOperatorId = false;
 
-// ---- Location state, fed by CRSF_FRAMETYPE_GPS frames sniffed off-air ----
+// EU UA classification (System message), user-configurable, persisted to NVS.
+// Deliberately only two options, not the full C0..C6 range: this firmware
+// targets self-built aircraft, which are not CE-class-marked products - only
+// a manufacturer can legitimately declare C1..C6. Offering those would let
+// the module claim a certified class the airframe doesn't have. The two
+// honest choices are:
+//   REMOTEID_CLASS_LEGACY (0): no class marking declared. ClassificationType
+//     = UNDECLARED. The accurate choice for almost every self-built craft.
+//   REMOTEID_CLASS_C0     (1): ClassificationType = EU, ClassEU = CLASS_0.
+//     Only select this if the aircraft genuinely meets the C0 criteria
+//     (<250g, <19m/s Vmax, etc per EU 2019/945 Part 1) - "C0" is not a
+//     free pass, it's a declared conformity claim like any other class.
+#define REMOTEID_CLASS_LEGACY 0
+#define REMOTEID_CLASS_C0     1
+#ifndef REMOTEID_DEFAULT_CLASS
+#define REMOTEID_DEFAULT_CLASS REMOTEID_CLASS_C0
+#endif
+static uint8_t s_classNum = REMOTEID_DEFAULT_CLASS;
+
+// ---- Location state, fed by CRSF telemetry frames sniffed off-air ----
 // Written by the sink (loop task), read by fillUasData (loop task) - same
 // thread, no contention. s_haveTakeoff also latches the operator/take-off
 // position for the ASTM System message.
@@ -147,23 +191,50 @@ static float   s_headingDeg = 0;
 static uint8_t s_sats = 0;
 static uint32_t s_lastFixMs = 0;
 
-// Take-off/operator position: latched from the first fix (ASTM System message).
+// Vertical speed (m/s): from VARIO/BARO telemetry when present, else derived
+// from successive GPS geodetic-altitude samples.
+static float    s_vspeedMs = 0;
+static uint32_t s_vspeedTeleMs = 0;           // last time vspeed came from telemetry (not GPS-derived)
+static float    s_lastGpsAltM = -1000;        // for GPS-derived vspeed
+static uint32_t s_lastGpsAltMs = 0;
+
+// Barometric altitude (m), from CRSF BARO_ALTITUDE telemetry if the aircraft sends it.
+static float    s_baroAltM = -1000;
+static bool     s_haveBaro = false;
+static uint32_t s_lastBaroMs = 0;
+
+// Flight state, decoded from CRSF FLIGHT_MODE string (Betaflight convention:
+// "!FS!" = failsafe, trailing "*" = disarmed).
+static bool s_haveMode = false;
+static bool s_armed = false;
+static bool s_failsafe = false;
+
+// Take-off/operator position: latched at ARM (or first fix as fallback).
 static bool   s_haveTakeoff = false;
 static double s_takeoffLat = 0, s_takeoffLon = 0;
+static float  s_takeoffAltM = -1000;
 
 class RIDConfigCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *c) override {
         std::string v = c->getValue();
-        if (v.rfind("O:", 0) != 0) return;   // only "O:<operator id>" understood here
-        std::string opId = v.substr(2);
-        while (!opId.empty() && (opId.back() == '\n' || opId.back() == '\r')) opId.pop_back();
-        if (opId.length() > ODID_ID_SIZE) opId.resize(ODID_ID_SIZE);   // bound untrusted input
-        // Buffer it; RemoteID_Tick (loop task) does the NVS flash write. Fill
-        // the string fully BEFORE raising the flag (loop task reads it once set).
-        strncpy(s_pendingOpId, opId.c_str(), ODID_ID_SIZE);
-        s_pendingOpId[ODID_ID_SIZE] = 0;
-        s_pendingSave = true;
-        DBGLN("[RID] operator ID received (%u chars), saving in loop task", (unsigned)opId.length());
+        // All heavy work (NVS flash write) is deferred to RemoteID_Tick via
+        // these flags/buffers - a flash write inside a BLE callback crashes the chip.
+        if (v.rfind("O:", 0) == 0) {              // "O:<operator id>"
+            std::string opId = v.substr(2);
+            while (!opId.empty() && (opId.back() == '\n' || opId.back() == '\r')) opId.pop_back();
+            if (opId.length() > ODID_ID_SIZE) opId.resize(ODID_ID_SIZE);   // bound untrusted input
+            strncpy(s_pendingOpId, opId.c_str(), ODID_ID_SIZE);            // fill buffer BEFORE flag
+            s_pendingOpId[ODID_ID_SIZE] = 0;
+            s_pendingSave = true;
+            DBGLN("[RID] operator ID received (%u chars), saving in loop task", (unsigned)opId.length());
+        }
+        else if (v.rfind("C:", 0) == 0 && v.length() >= 3) {   // "C:0"=Legacy, "C:1"=C0 only
+            int cls = v[2] - '0';
+            if (cls == REMOTEID_CLASS_LEGACY || cls == REMOTEID_CLASS_C0) {
+                s_pendingClass = cls;
+                DBGLN("[RID] EU class %s received, saving in loop task", cls == REMOTEID_CLASS_C0 ? "C0" : "Legacy");
+            }
+        }
     }
 };
 
@@ -192,27 +263,95 @@ static inline int32_t be32s(const uint8_t *p) {
     return (int32_t)(((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]);
 }
 static inline uint16_t be16u(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
+static inline int16_t  be16s(const uint8_t *p) { return (int16_t)((p[0] << 8) | p[1]); }
 
-// ---- Sink: pull GPS out of every CRSF frame the sniffer reassembles ----
+// Latch the current position+altitude as the take-off / operator reference.
+static void latchTakeoff(const char *why)
+{
+    if (!s_haveFix) return;
+    s_takeoffLat  = s_lat;
+    s_takeoffLon  = s_lon;
+    s_takeoffAltM = s_altM;
+    s_haveTakeoff = true;
+    DBGLN("[RID] latched take-off (%s) %d,%d alt=%dm",
+          why, (int)(s_lat * 1e7), (int)(s_lon * 1e7), (int)s_altM);
+}
+
+// ---- Sink: pull GPS / vario / baro / flight-mode out of the sniffed CRSF ----
 static void RemoteID_sink(const uint8_t *frame, uint8_t len)
 {
-    if (len < 4 || frame[2] != CRSF_FRAMETYPE_GPS) return;
-    const uint8_t *p = frame + 3;
+    if (len < 4) return;
+    const uint8_t type = frame[2];
+    const uint8_t *p   = frame + 3;
+    const uint8_t plen = (len >= 4) ? (uint8_t)(len - 4) : 0;   // payload bytes (excl dest/len/type/crc)
 
-    s_lat        = be32s(p)      * 1e-7;               // deg
-    s_lon        = be32s(p + 4)  * 1e-7;                // deg
-    s_speedMs    = be16u(p + 8)  * 0.1f * (1000.0f / 3600.0f); // 0.1km/h -> m/s
-    s_headingDeg = be16u(p + 10) * 0.01f;               // deg
-    s_altM       = (float)((int32_t)be16u(p + 12) - 1000); // m
-    s_sats       = p[14];
-    s_lastFixMs  = millis();
-    s_haveFix    = (s_lat != 0.0 || s_lon != 0.0);
+    switch (type)
+    {
+    case CRSF_FRAMETYPE_GPS: {
+        if (plen < 15) return;
+        s_lat        = be32s(p)      * 1e-7;               // deg
+        s_lon        = be32s(p + 4)  * 1e-7;                // deg
+        s_speedMs    = be16u(p + 8)  * 0.1f * (1000.0f / 3600.0f); // 0.1km/h -> m/s
+        s_headingDeg = be16u(p + 10) * 0.01f;               // deg
+        s_altM       = (float)((int32_t)be16u(p + 12) - 1000); // m
+        s_sats       = p[14];
+        s_lastFixMs  = millis();
+        s_haveFix    = (s_lat != 0.0 || s_lon != 0.0);
 
-    if (s_haveFix && !s_haveTakeoff) {
-        s_takeoffLat = s_lat;
-        s_takeoffLon = s_lon;
-        s_haveTakeoff = true;
-        DBGLN("[RID] latched takeoff/operator fix %d,%d (x1e-7)", (int)(s_lat * 1e7), (int)(s_lon * 1e7));
+        // GPS-derived vertical speed (fallback when no vario/baro telemetry).
+        uint32_t now = millis();
+        if (s_lastGpsAltMs != 0) {
+            float dt = (now - s_lastGpsAltMs) / 1000.0f;
+            if (dt >= 0.15f && dt < 5.0f && (now - s_vspeedTeleMs) > 3000) {   // vario stale -> use GPS
+                s_vspeedMs = (s_altM - s_lastGpsAltM) / dt;
+            }
+        }
+        s_lastGpsAltM = s_altM;
+        s_lastGpsAltMs = now;
+
+        // Take-off latch, GPS side: normal case is "first fix" when no flight-mode
+        // telemetry ever arrives. Also covers joining mid-flight already-armed: the
+        // FLIGHT_MODE handler's rising-edge latch below no-ops without a fix yet
+        // (armed state has already been observed, so no *later* edge will fire) -
+        // catch that here as soon as a fix does arrive.
+        if (s_haveFix && !s_haveTakeoff && (!s_haveMode || s_armed))
+            latchTakeoff(s_armed ? "arm (deferred, fix arrived after mode)" : "first fix");
+        break;
+    }
+    case CRSF_FRAMETYPE_VARIO: {
+        if (plen < 2) return;
+        s_vspeedMs = be16s(p) / 100.0f;   // cm/s -> m/s
+        s_vspeedTeleMs = millis();
+        break;
+    }
+    case CRSF_FRAMETYPE_BARO_ALTITUDE: {
+        if (plen < 2) return;
+        uint16_t raw = be16u(p);
+        if (raw & 0x8000) s_baroAltM = (float)(raw & 0x7FFF);        // high bit set -> meters
+        else              s_baroAltM = ((int32_t)raw - 10000) / 10.0f;  // decimeters + 10000dm
+        s_haveBaro = true;
+        s_lastBaroMs = millis();
+        if (plen >= 4) {                   // combined baro+vario frame also carries vertical speed
+            s_vspeedMs = be16s(p + 2) / 100.0f;
+            s_vspeedTeleMs = millis();
+        }
+        break;
+    }
+    case CRSF_FRAMETYPE_FLIGHT_MODE: {
+        char mode[17]; uint8_t i = 0;
+        while (i < 16 && i < plen && p[i]) { mode[i] = (char)p[i]; i++; }
+        mode[i] = 0;
+        s_haveMode = true;
+        // Betaflight: "!FS!" during failsafe; trailing "*" means disarmed.
+        s_failsafe = (strstr(mode, "!FS") != nullptr);
+        bool disarmed = (i > 0 && mode[i - 1] == '*');
+        bool armedNow = (i > 0) && !disarmed && !s_failsafe;
+        if (armedNow && !s_armed) latchTakeoff("arm");   // re-latch at the moment of arming
+        s_armed = armedNow;
+        break;
+    }
+    default:
+        break;
     }
 }
 
@@ -271,16 +410,21 @@ static void fillUasData(ODID_UAS_Data *uas)
     strncpy(uas->BasicID[0].UASID, uasId, ODID_ID_SIZE);
     uas->BasicIDValid[0] = 1;
 
-    uas->Location.Status          = s_haveFix ? ODID_STATUS_AIRBORNE : ODID_STATUS_UNDECLARED;
+    // Status: failsafe (from CRSF flight mode) -> EMERGENCY; else airborne when
+    // we have a fix. (No ground/airborne discriminator without an AGL/arm source
+    // beyond the arm latch, so a valid fix reads as airborne.)
+    uas->Location.Status          = s_failsafe ? ODID_STATUS_EMERGENCY
+                                    : (s_haveFix ? ODID_STATUS_AIRBORNE : ODID_STATUS_UNDECLARED);
     uas->Location.Direction       = s_headingDeg;
     uas->Location.SpeedHorizontal = s_speedMs;
-    uas->Location.SpeedVertical   = 0;                 // not available from this GPS frame
+    uas->Location.SpeedVertical   = s_vspeedMs;         // from vario/baro telemetry, else GPS-derived
     uas->Location.Latitude        = s_lat;
     uas->Location.Longitude       = s_lon;
     uas->Location.AltitudeGeo     = s_altM;
-    uas->Location.AltitudeBaro    = -1000;              // unknown on this data path
+    uas->Location.AltitudeBaro    = s_haveBaro ? s_baroAltM : -1000;   // if the aircraft sends baro
     uas->Location.HeightType      = ODID_HEIGHT_REF_OVER_TAKEOFF;
-    uas->Location.Height          = -1000; // no independent AGL/height-over-takeoff source on this data path
+    // Height above take-off = current geodetic altitude - latched take-off altitude.
+    uas->Location.Height          = (s_haveTakeoff && s_takeoffAltM > -1000) ? (s_altM - s_takeoffAltM) : -1000;
     uas->Location.HorizAccuracy   = createEnumHorizontalAccuracy(s_sats >= 6 ? 10.0f : 92.6f);
     uas->Location.VertAccuracy    = ODID_VER_ACC_UNKNOWN;
     uas->Location.BaroAccuracy    = ODID_VER_ACC_UNKNOWN;
@@ -289,15 +433,27 @@ static void fillUasData(ODID_UAS_Data *uas)
     uas->Location.TimeStamp       = INV_TIMESTAMP;      // no UTC time source on this data path - see file header
     uas->LocationValid            = s_haveFix ? 1 : 0;
 
+    // Operator/take-off location. We can't see the pilot's own GNSS from a
+    // drone-side sniffer, so we report the aircraft's take-off point (latched at
+    // arm) as OperatorLocationType TAKEOFF - spec-legal, and an approximation of
+    // the operator location (good when the pilot launches from where they stand).
     uas->System.OperatorLocationType = ODID_OPERATOR_LOCATION_TYPE_TAKEOFF;
-    uas->System.ClassificationType   = ODID_CLASSIFICATION_TYPE_UNDECLARED;
     uas->System.OperatorLatitude     = s_haveTakeoff ? s_takeoffLat : 0;
     uas->System.OperatorLongitude    = s_haveTakeoff ? s_takeoffLon : 0;
+    uas->System.OperatorAltitudeGeo  = (s_haveTakeoff && s_takeoffAltM > -1000) ? s_takeoffAltM : -1000;
     uas->System.AreaCount            = 1;
     uas->System.AreaRadius           = 0;
     uas->System.AreaCeiling          = -1000;
     uas->System.AreaFloor            = -1000;
-    uas->System.OperatorAltitudeGeo  = -1000;
+    // EU classification (user-configured, default C0; see REMOTEID_CLASS_*
+    // above for why only C0/Legacy are offered). Legacy = no class claimed.
+    if (s_classNum == REMOTEID_CLASS_C0) {
+        uas->System.ClassificationType = ODID_CLASSIFICATION_TYPE_EU;
+        uas->System.CategoryEU         = ODID_CATEGORY_EU_OPEN;
+        uas->System.ClassEU            = ODID_CLASS_EU_CLASS_0;
+    } else {
+        uas->System.ClassificationType = ODID_CLASSIFICATION_TYPE_UNDECLARED;   // "Legacy" - no class marking
+    }
     uas->System.Timestamp            = 0;               // no UTC time source - see file header
     uas->SystemValid                 = s_haveTakeoff ? 1 : 0;
 
@@ -373,6 +529,27 @@ void RemoteID_SetOperatorId(const char *id)
     RemoteID_ReportOperatorId();
 }
 
+// Machine-parseable EU class line for a host/GCS reading the debug serial.
+// Prints the human label ("LEGACY"/"C0"), not the raw stored number, since
+// that's what a host needs to display/round-trip unambiguously.
+void RemoteID_ReportClass(void)
+{
+    DBGLN("[RID] CLASS=%s", s_classNum == REMOTEID_CLASS_C0 ? "C0" : "LEGACY");
+}
+
+// Set + persist the EU class. Only REMOTEID_CLASS_LEGACY (0) or
+// REMOTEID_CLASS_C0 (1) are accepted - see the REMOTEID_CLASS_* comment
+// above for why the rest of the C1..C6 range isn't offered. Loop-task
+// context (NVS write).
+void RemoteID_SetClass(uint8_t classNum)
+{
+    if (classNum != REMOTEID_CLASS_LEGACY && classNum != REMOTEID_CLASS_C0) return;
+    s_classNum = classNum;
+    s_prefs.putUChar("class", s_classNum);
+    DBGLN("[RID] EU class saved to NVS");
+    RemoteID_ReportClass();
+}
+
 void RemoteID_Tick(uint32_t nowMs)
 {
     if (!s_adv) return;
@@ -389,6 +566,13 @@ void RemoteID_Tick(uint32_t nowMs)
         s_configWriteDone = true;   // lets the config window close once the phone disconnects
         DBGLN("[RID] operator ID saved to NVS (via BLE)");
         RemoteID_ReportOperatorId();   // parseable line for a GCS on the serial
+    }
+    if (s_pendingClass >= 0) {
+        s_classNum = (uint8_t)s_pendingClass;
+        s_pendingClass = -1;
+        s_prefs.putUChar("class", s_classNum);
+        DBGLN("[RID] EU class saved to NVS (via BLE)");
+        RemoteID_ReportClass();
     }
     if (s_pendingReadvertise) {
         s_pendingReadvertise = false;
@@ -424,6 +608,33 @@ void RemoteID_Tick(uint32_t nowMs)
     // GPS telemetry is only as fresh as the last sniffed CRSF GPS frame;
     // if the sniffer lost lock on the RC link, stop claiming a fix.
     if (s_haveFix && (nowMs - s_lastFixMs) > 5000) s_haveFix = false;
+
+    // WAIT state: no drone telemetry (no GPS fix, ever or currently) means we
+    // have nothing real to report. Broadcasting a Basic-ID-only "drone" with an
+    // undeclared position isn't useful Remote ID - it's a ghost. Pause
+    // instances 0/1 entirely and wait for a real fix instead of burning
+    // airtime on it; resume the moment one arrives.
+    //
+    // INVARIANT (deliberate, do not "simplify" this away in a future edit):
+    // this only ever touches instances 0/1. It can only run once we're past
+    // the `s_phase == RID_CONFIG` block's unconditional `return` above, so the
+    // BLE config window (instance 2) is untouched by it - and it never touches
+    // Serial/SerialLogger, so the GCS's serial link is untouched too. Waiting
+    // for telemetry must never delay or interrupt either of those.
+    static bool s_broadcastActive = false;
+    if (!s_haveFix) {
+        if (s_broadcastActive) {
+            s_adv->stop(0);
+            s_adv->stop(1);
+            s_broadcastActive = false;
+            DBGLN("[RID] no drone telemetry - broadcast paused, waiting for a GPS fix");
+        }
+        return;
+    }
+    if (!s_broadcastActive) {
+        s_broadcastActive = true;
+        DBGLN("[RID] GPS fix acquired - resuming ODID broadcast");
+    }
 
     ODID_UAS_Data uas;
     fillUasData(&uas);
@@ -482,6 +693,11 @@ void RemoteID_Transport_Init(void)
         DBGLN("[RID] no operator ID in NVS yet - set via BLE 'O:' char or serial 'O:<id>'");
     }
     RemoteID_ReportOperatorId();   // emit parseable OPID= line at boot for a GCS
+
+    s_classNum = s_prefs.getUChar("class", REMOTEID_DEFAULT_CLASS);
+    if (s_classNum != REMOTEID_CLASS_LEGACY && s_classNum != REMOTEID_CLASS_C0)
+        s_classNum = REMOTEID_DEFAULT_CLASS;   // guard against garbage/stale NVS
+    RemoteID_ReportClass();        // emit parseable CLASS= line at boot for a GCS
 
     s_adv = NimBLEDevice::getAdvertising();
     // MUST set ext-adv callbacks: NimBLEExtAdvertising's constructor leaves

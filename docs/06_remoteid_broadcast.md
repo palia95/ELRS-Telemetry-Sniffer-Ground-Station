@@ -21,11 +21,35 @@ in‑sniffer path, dual‑PHY receiver‑compatibility analysis, PCB notes):
 ## 1. What it does
 
 - Rides the ELRS link passively exactly like the normal sniffer (§ `00_README.md`).
-- Pulls `CRSF_FRAMETYPE_GPS` out of the reassembled telemetry it already decodes.
+- Pulls GPS, and — if the aircraft sends them — VARIO / BARO_ALTITUDE /
+  FLIGHT_MODE, out of the reassembled telemetry it already decodes.
 - Encodes ASTM F3411 / EN 4709‑002 messages (Basic ID, Location/Vector, System,
   Operator ID) with Intel/opendroneid's `opendroneid-core-c`.
 - Broadcasts them as connectionless BLE advertisements — **no phone pairing, no
   GATT stream, no separate GPS tap** on the airframe.
+- **Derives what it can from that telemetry alone** (no extra sensor, no extra
+  wiring):
+  - **Vertical speed** — from VARIO/BARO telemetry when the aircraft sends
+    it, else differentiated from successive GPS altitude samples.
+  - **Height above take‑off** — current geodetic altitude minus the altitude
+    latched at take‑off.
+  - **Operator/take‑off altitude** — the same latched take‑off altitude.
+  - **Baro altitude** — passed through when `BARO_ALTITUDE` telemetry is
+    present; left "unknown" otherwise (optional field).
+  - **Emergency status** — `CRSF FLIGHT_MODE` decoded Betaflight‑style
+    (`!FS!` = failsafe) → `ODID_STATUS_EMERGENCY`. Best‑effort — not every
+    FC/mode string follows this convention.
+  - **Take‑off/operator position** — latched at the moment `FLIGHT_MODE`
+    reports **ARMED** (falls back to "first GPS fix" if no flight‑mode
+    telemetry ever arrives, and self‑heals if we join mid‑flight already‑armed
+    before a fix exists). We have no visibility into the *pilot's* own GNSS
+    from a drone‑side sniffer, so this is reported as
+    `OperatorLocationType = TAKEOFF`, not `LIVE_GNSS` — spec‑legal, and a
+    good approximation when the pilot launches from where they're standing;
+    not accurate for long‑range/repositioned flying.
+- **No telemetry, no broadcast.** Without a GPS fix there is nothing real to
+  report, so instances 0/1 stay off the air rather than broadcast a
+  Basic‑ID‑only "ghost" drone — see §2.
 
 This is a *different transport*, selected at build time. It is **mutually
 exclusive** with the GCS BLE transport (`devTransport_BLE.cpp`) — both own the
@@ -39,7 +63,17 @@ one BLE radio identity; the firmware `#error`s if both are enabled.
 |---|---|---|---|
 | **0** | 1M | Legacy (BT4) | One ODID message/second, biased to Location; rotates Basic ID / System in every 3rd slot. 31‑byte cap = one 25‑byte message. |
 | **1** | **LE Coded (S=8)** | BT5 Extended Adv (Long Range) | The full ODID **message pack** (Basic ID + Location + System [+ Operator ID]) in one advert. |
-| **2** | 1M | Legacy, **connectable** | A tiny Nordic‑UART‑Service GATT server for one‑time Operator‑ID entry. Retires itself once airborne. |
+| **2** | 1M | Legacy, **connectable** | A tiny Nordic‑UART‑Service GATT server for Operator ID / EU class entry. Up only during the boot **config window** (§8.2), not "until airborne" — see below. |
+
+Instances 0/1 only broadcast while a GPS fix exists (or is fresh — stale
+`>5s` = treated as lost). **No fix means the module goes quiet** rather than
+broadcasting a Basic‑ID‑only "ghost" drone with an undeclared position — that
+isn't useful Remote ID. Broadcasting resumes automatically the moment a fix
+(re)appears. This wait state is scoped so it can never delay the config
+window or touch the debug serial link: it only runs once `RemoteID_Tick` has
+already left the config phase, and it only ever calls `stop()`/`start()` on
+instances 0/1 (see the `devTransport_RemoteID.cpp` comment marked
+`INVARIANT` for the enforcement).
 
 Why both 0 and 1: Legacy is what nearly every scanner (all iOS, older Android)
 can receive; Coded PHY adds range for the subset of Android phones that support
@@ -288,6 +322,40 @@ separate BLE advertisement only a Remote ID scanner app decodes.
 > fires when the connectable instance turns into a connection, crashing the
 > instant a phone connects.
 
+### 8.4 EU UA classification: C0 or Legacy only (default C0)
+
+The System message's EU classification field is configurable — but
+**deliberately limited to two options**, not the full C0–C6 range the ODID
+spec defines:
+
+- **`C0`** — `ClassificationType = EU`, `ClassEU = CLASS_0`. Only pick this if
+  the aircraft genuinely meets the C0 criteria (EU 2019/945 Part 1: <250g,
+  <19 m/s max speed, etc.) — it's a declared‑conformity claim, not a free
+  default for "small drone".
+- **`Legacy`** (default’s sibling option) — `ClassificationType = UNDECLARED`,
+  no class marking claimed at all.
+
+**Why not C1–C6:** those are *manufacturer‑declared* classes tied to a CE
+marking on a commercially placed‑on‑market product. A self‑built airframe —
+which is what this sniffer/RemoteID module is designed around — cannot
+legitimately claim them. Offering the full dropdown would let someone
+broadcast a certified class their aircraft doesn't have, which is worse than
+not broadcasting a class at all. **Default is C0**; switch to `Legacy` if
+that doesn't apply to your build.
+
+Same three control paths as the Operator ID:
+
+- **BLE** (instance 2, config window): write `C:1` (C0) or `C:0` (Legacy) to
+  characteristic `6E400002`.
+- **Serial:** `C:1\n` / `C:0\n` to set, `C?\n` to read →
+  `[RID] CLASS=C0` or `[RID] CLASS=LEGACY`.
+- **GCS:** a *class* dropdown (only "C0" / "Legacy (no class marking)") with
+  **Set class** / **Read** buttons next to the Operator ID field.
+
+Any other value (`C:2`..`C:6`, garbage) is rejected by the firmware and
+ignored — the stored value never changes. Persisted to NVS like the Operator
+ID, survives reboots, defaults to C0 on first boot / if NVS is empty.
+
 ---
 
 ## 9. Compliance status — what's done, what's missing
@@ -297,13 +365,19 @@ Broadcasting valid frames ≠ EASA conformance. Current state:
 | Field / message | Status |
 |---|---|
 | Basic ID | ✅ sent — but a **synthesized** `ELRS-<UID>` identifier, **not** a real CAA registration / ANSI‑CTA‑2063 serial (we only overhear the aircraft). |
-| Location/Vector | ✅ sent when a GPS fix exists; withheld (status undeclared) otherwise. |
-| System (operator/takeoff position) | ✅ sent once a take‑off fix is latched. |
+| Location/Vector (lat/lon/alt/speed/heading) | ✅ sent when a GPS fix exists; withheld (status undeclared) otherwise — and instances 0/1 go off the air entirely with no fix (§2), not just "undeclared". |
+| Location **vertical speed** | ✅ derived — from VARIO/BARO telemetry when present, else from successive GPS altitude samples. |
+| Location **height above take‑off** | ✅ derived — current altitude minus the altitude latched at take‑off. |
+| Location **baro altitude** | ✅ pass‑through when the aircraft sends `BARO_ALTITUDE` telemetry; "unknown" otherwise (optional field either way). |
+| Location **status = EMERGENCY** | ✅ derived, best‑effort — from CRSF `FLIGHT_MODE` (`!FS!` = failsafe convention). Not every FC/mode string follows it. |
+| System (operator/take‑off position) | ✅ sent once take‑off is latched (now at **ARM**, via `FLIGHT_MODE`, not just first fix — §1). |
+| System **operator altitude** | ✅ derived — the same latched take‑off altitude. |
+| System **EU classification** | ✅ user‑configurable, **C0 or Legacy only** (§8.4), default C0. Not the full C1–C6 range — see §8.4 for why. |
 | Operator ID | ✅ sent when set (§8). **Mandatory for EU/EASA**, optional in base ASTM. |
 | Location/System **timestamp** | ⚠️ left "unknown" — **no UTC time source** on this data path (CRSF GPS carries no time). Not faked from `millis()`. |
-| EU UA **classification** (C0–C4) | ❌ `UNDECLARED`. |
 | Self‑ID | ❌ not sent (optional in spec). |
 | Physical placement | ⚠️ must be **onboard the aircraft**, not ground‑side with the handset. |
+| C0 classification accuracy | ⚠️ **the module reports whatever class you configure — it does not verify the aircraft actually meets C0's weight/speed criteria.** That check is on you. |
 
 **A working broadcast is a technical prototype, not a legal compliance claim.**
 Operating under EASA Direct Remote ID requires a conformity assessment against

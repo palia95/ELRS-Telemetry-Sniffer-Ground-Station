@@ -90,6 +90,15 @@
         <button id="opidRead">Read</button>
       </div>
       <div class="foot" id="opidFoot" style="margin-top:2px"></div>
+      <div class="row">
+        <select id="uaClass" title="Self-built aircraft can't claim manufacturer-declared classes C1-C6">
+          <option value="1">C0</option>
+          <option value="0">Legacy (no class marking)</option>
+        </select>
+        <button id="classBtn">Set class</button>
+        <button id="classRead">Read</button>
+      </div>
+      <div class="foot" id="classFoot" style="margin-top:2px"></div>
       <div class="row" id="bleHdr" style="display:none">
         <span>BLE devices <span id="bleCount"></span></span>
         <span id="bleToggle">▾</span>
@@ -298,6 +307,11 @@ function connect(){
       $('opidFoot').textContent = d.value ? ('Current: '+d.value) : 'No Operator ID set on device.';
       return;
     }
+    if(d.type==='class'){
+      $('uaClass').value = String(d.value);
+      $('classFoot').textContent = 'Current: ' + (d.value===1 ? 'C0' : 'Legacy (no class marking)');
+      return;
+    }
     if(d.type!=='telemetry') return;
     lastRx = Date.now();
     if('tlm_age' in d) tlmAge = d.tlm_age;
@@ -322,9 +336,10 @@ function renderSources(d){
   if(s.status==='connected' && lastSrcStatus!=='connected'){
     const p=(localStorage.getItem(PHRASE_KEY)||'').trim();
     if(p) setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'set_phrase', phrase:p})); }catch(e){} }, 800);
-    // Ask the Remote ID firmware for its current Operator ID (serial only; a
-    // no-op on non-RemoteID builds, which simply never reply with OPID=).
+    // Ask the Remote ID firmware for its current Operator ID / EU class (serial
+    // only; a no-op on non-RemoteID builds, which simply never reply).
     setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_operator_id'})); }catch(e){} }, 1000);
+    setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_class'})); }catch(e){} }, 1200);
   }
   lastSrcStatus = s.status;
   // serial dropdown (keep current selection if still valid)
@@ -387,6 +402,13 @@ function sendOperatorId(){
 $('opidBtn').onclick = sendOperatorId;
 $('opid').addEventListener('keydown', e=>{ if(e.key==='Enter') sendOperatorId(); });
 $('opidRead').onclick = ()=>{ ws.send(JSON.stringify({cmd:'get_operator_id'})); $('opidFoot').textContent='Reading…'; };
+
+// ---- EU UA class (Remote ID firmware, default C0) ----
+$('classBtn').onclick = ()=>{
+  ws.send(JSON.stringify({cmd:'set_class', class_num: parseInt($('uaClass').value, 10)}));
+  $('classFoot').textContent = 'Sent — saving to device NVS…';
+};
+$('classRead').onclick = ()=>{ ws.send(JSON.stringify({cmd:'get_class'})); $('classFoot').textContent='Reading…'; };
 
 connect();
 redraw();
