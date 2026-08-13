@@ -274,6 +274,9 @@ void Ghost_Loop(uint32_t nowMs)
 #if defined(GHOST_DISPLAY)
     GhostDisplay_Tick(nowMs);
 #endif
+#if defined(GHOST_TRANSPORT_REMOTEID)
+    RemoteID_Tick(nowMs);
+#endif
 
     // 5 Hz: inject our own link stats (RSSI/LQ) as a CRSF frame into the stream.
     static uint32_t lastLink = 0;
@@ -327,8 +330,14 @@ void Ghost_SetupTransports(void)
 #if defined(GHOST_TRANSPORT_SERIAL)
     GhostSerial_Init();
 #endif
+#if defined(GHOST_TRANSPORT_BLE) && defined(GHOST_TRANSPORT_REMOTEID)
+#error GHOST_TRANSPORT_BLE and GHOST_TRANSPORT_REMOTEID both claim the one BLE radio identity - pick one env.
+#endif
 #if defined(GHOST_TRANSPORT_BLE)
     BLE_Transport_Init("ELRS TLM RX");
+#endif
+#if defined(GHOST_TRANSPORT_REMOTEID)
+    RemoteID_Transport_Init();
 #endif
 #if defined(GHOST_TRANSPORT_WIFI_UDP)
     WiFiUDP_Transport_Init();

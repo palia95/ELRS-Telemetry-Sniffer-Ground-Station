@@ -19,7 +19,9 @@ SRC_FILES = [
     "sniffer.h", "sniffer.cpp",
     "devTransport_Serial.cpp",
     "devTransport_BLE.cpp", "devTransport_WiFiUDP.cpp",
+    "devTransport_RemoteID.cpp",
     "devGhostDisplay.h", "devGhostDisplay.cpp",
+    "opendroneid.h", "opendroneid.c",
 ]
 
 # (anchor, replacement) — anchor must appear verbatim & exactly once.
