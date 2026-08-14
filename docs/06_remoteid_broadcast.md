@@ -164,7 +164,7 @@ phase, and it only ever calls `stop()`/`start()` on instances 0/1 (see the
 > uplink telemetry pipe (see `TLMBurstMaxForRateRatio()` in
 > `common.cpp`), so its real update interval can be several seconds even at
 > a moderate Telem Ratio — not the ~1Hz an idealized "GPS is fast" assumption
-> would suggest. Field‑measured (2026‑08‑14, 150Hz / 1:64 Telem Ratio):
+> would suggest. Field‑measured (2026‑08‑14, 150Hz / 1:32 (STD) Telem Ratio):
 > genuine GPS updates every **~4.6–4.9s**. The threshold used to be a
 > hardcoded `5000ms`, sitting right on top of that real cadence — normal
 > jitter (one delayed/dropped telemetry chunk) was enough to push an
@@ -172,7 +172,10 @@ phase, and it only ever calls `stop()`/`start()` on instances 0/1 (see the
 > identity/operator fields as "learned once, sticky" but treats *live
 > aircraft position* as something that must be fresh will show exactly that
 > as a symptom: pilot/operator info populates, aircraft position doesn't (or
-> flickers). If your Telem Ratio is more conservative than 1:64, raise
+> flickers). **Later same‑day retests at 1:32 and 1:16 showed zero staleness
+> events yet the position‑not‑shown symptom persisted — this threshold fix
+> was real and worth keeping, but it was not the actual cause of that
+> symptom. See §11 below.** If your Telem Ratio is more conservative than 1:32, raise
 > `REMOTEID_FIX_STALE_MS` further — it should be a solid multiple of your
 > actual observed GPS cadence, not just barely above it.
 
@@ -475,7 +478,7 @@ Broadcasting valid frames ≠ EASA conformance. Current state:
 | System **operator altitude** | ✅ derived — the same latched take‑off altitude. |
 | System **EU classification** | ✅ user‑configurable, **C0 or Legacy only** (§8.4), default C0. Not the full C1–C6 range — see §8.4 for why. |
 | Operator ID | ✅ sent when set (§8). **Mandatory for EU/EASA**, optional in base ASTM. |
-| Location/System **timestamp** | ⚠️ left "unknown" — **no UTC time source** on this data path (CRSF GPS carries no time). Not faked from `millis()`. |
+| Location/System **timestamp** | ✅ set from the **GCS's system clock**, pushed once per serial connect (`T:<unix seconds>`, §1). CRSF GPS itself carries no time field, so this only works while a GCS has connected over USB serial at least once this boot — pure BLE-only sessions (no cable ever attached) still report "unknown", honestly, not faked from `millis()`. |
 | Self‑ID | ❌ not sent (optional in spec). |
 | Physical placement | ⚠️ must be **onboard the aircraft**, not ground‑side with the handset. |
 | C0 classification accuracy | ⚠️ **the module reports whatever class you configure — it does not verify the aircraft actually meets C0's weight/speed criteria.** That check is on you. |
@@ -497,7 +500,8 @@ parse/scaling and the ODID encode↔decode round‑trip:
 cd firmware/test
 cc -std=c11 test_remoteid.c ../src/opendroneid.c -I../src -lm -o /tmp/t && /tmp/t
 # -> ALL CHECKS PASSED  (GPS parse, ODID round-trip, pack layout, FLIGHT_MODE
-#    armed/emergency classification, Location.Status mapping)
+#    armed/emergency classification, Location.Status mapping, serial
+#    time-sync epoch/hour-wrap math)
 ```
 
 The FLIGHT_MODE and Status test blocks mirror the exact expressions in
@@ -531,3 +535,50 @@ board revision; if truly non‑PA, drop those two keys from the layout JSON.
 Everything above is bench‑verified only (synthetic test cases, no real
 GPS/link). [`07_remoteid_field_test_checklist.md`](07_remoteid_field_test_checklist.md)
 is the phased checklist for the first real end‑to‑end test.
+
+---
+
+## 13. Field-test finding: DroneTag showed identity but not live position
+
+Three real flights (2026‑08‑14, at 1:32/STD then 1:16 Telem Ratio) all showed
+the same symptom in the DroneTag receiver app: pilot/Operator ID fields
+displayed correctly, but the aircraft's live position never appeared.
+
+**Ruled out, in order, each with real evidence — not assumption:**
+1. **Stale/flapping fix** — `REMOTEID_FIX_STALE_MS` was genuinely too tight
+   (§2) and was fixed, but a 1:16‑ratio retest with **zero** staleness events
+   still showed the same symptom. Real bug, not the cause of this one.
+2. **Vertical‑speed out‑of‑range** (ODID's ±62 m/s `SpeedVertical` bound
+   silently failing `encodeLocationMessage()`) — computed precisely from the
+   captured CSVs; worst case was 9.8 m/s. Ruled out.
+3. **Encoding correctness** — a real BLE capture (`nRF Connect`) was decoded
+   byte‑exact against the actual `opendroneid-core-c` encoder source. Every
+   field (BasicID, Location lat/lon/status/speed, System operator
+   location/class, OperatorID) matched real telemetry exactly. Ruled out.
+
+**Leading suspect, addressed this session:** `Location.TimeStamp` was always
+`INV_TIMESTAMP` (0xFFFF) and — more notably — `ODID_System_data.Timestamp`
+was always the **literal integer 0**, which decodes as
+"2019‑01‑01T00:00:00Z" with **no "unknown" sentinel defined for that field**
+in the spec/library. A safety‑conscious receiver plausibly treats that as
+"this position claims to be 7+ years stale" and withholds it, while
+timestamp‑independent identity fields still display fine — which matches the
+observed symptom exactly.
+
+**Fix implemented:** the GCS pushes its own system clock over the existing
+serial connection once per connect (`T:<unix seconds>`, mirroring the
+existing phrase/Operator‑ID/EU‑class auto‑push pattern — see §8's config
+flow). The firmware derives both ODID timestamp fields from it:
+`Location.TimeStamp = unixNow % 3600` (seconds after the full hour, per
+spec) and `System.Timestamp = unixNow - 1546300800` (seconds since the ODID
+2019 epoch). Session‑only/RAM‑only by design (no NVS write) — same rationale
+as the take‑off‑position snapshot (§1): `millis()` resets on reboot anyway,
+and the GCS re‑syncs it on every reconnect for free, including post‑reboot.
+If no GCS ever connects over serial this session (BLE‑only flight, no
+cable), both fields still honestly report "unknown" rather than a fake time.
+
+**Not yet confirmed against a real flight** — this is the mechanism most
+consistent with the evidence gathered, not a proven fix. Re‑test with
+DroneTag (and ideally the OpenDroneID Android reference app as a second,
+independent receiver) is the next step once this build is flashed and
+verified on the bench.

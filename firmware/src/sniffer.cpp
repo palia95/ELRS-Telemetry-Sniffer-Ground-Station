@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 #include <string.h>
+#include <stdlib.h>                 // strtoul (RemoteID "T:" serial time-sync command)
 #include <MD5Builder.h>             // ESP32 Arduino core (stable across mbedtls versions)
 #include "logging.h"                // DBGLN heartbeat
 #include "CRSF.h"                   // CRSF::LinkStatistics
@@ -280,6 +281,16 @@ static void Sniffer_PollSerialCmd()
             else if (idx >= 2 && line[0] == 'C' && line[1] == '?')
             {
                 RemoteID_ReportClass();             // host/GCS reads back "[RID] CLASS=Cn"
+            }
+            else if (idx >= 3 && line[0] == 'T' && line[1] == ':')
+            {
+                // "T:<unix seconds>" - GCS pushes its system clock over serial so
+                // Location/System timestamps aren't always "unknown". See
+                // RemoteID_SetTime() for why this can only come from serial (no
+                // other UTC source exists on this data path).
+                line[idx] = 0;
+                uint32_t unixSecs = (uint32_t)strtoul(line + 2, nullptr, 10);
+                if (unixSecs > 0) RemoteID_SetTime(unixSecs);
             }
 #endif
             idx = 0;

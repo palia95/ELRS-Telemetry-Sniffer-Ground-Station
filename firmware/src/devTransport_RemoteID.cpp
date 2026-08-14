@@ -106,13 +106,17 @@
 // in the T3S3_Sniffer_2400_RX_RemoteID env). Mutually exclusive with
 // GHOST_TRANSPORT_BLE - both claim the one BLE radio identity.
 //
-// KNOWN GAP (flagged, not hidden): ODID_System_data.Timestamp wants real
-// UTC seconds since 2019-01-01. The CRSF GPS frame this sniffer decodes
-// carries no time field, so there is no time source on this data path.
-// Using millis()-since-boot here would be actively wrong (decoders may
-// treat it as a real UTC offset), so the timestamp is left at 0
-// (unknown/not provided) until a real time source (GPS NMEA ZDA/RMC via a
-// direct tap, or SNTP over the WiFi-UDP transport's AP) is wired in.
+// UTC TIME SOURCE: the CRSF GPS frame this sniffer decodes carries no time
+// field, so there is no time source on the telemetry data path itself.
+// Instead, the GCS (which has an accurate system clock and connects over
+// USB serial most sessions) pushes its current UTC time once per connect via
+// "T:<unix seconds>" - see RemoteID_SetTime(). This is RAM-only / session-only
+// (millis()-derived, no NVS): every reconnect - including after a sniffer
+// reboot - re-syncs it, same rationale as the take-off-position snapshot
+// below. CAVEAT: if the sniffer flies a full session without a GCS ever
+// connecting over serial (BLE broadcast only, no cable), both timestamp
+// fields report their spec "unknown" value for that whole session - this is
+// the accepted, honest fallback, not a bug.
 // =====================================================================
 #if defined(GHOST_TRANSPORT_REMOTEID) && defined(PLATFORM_ESP32)
 
@@ -153,14 +157,14 @@ extern "C" {
 // entirely a function of the TX's configured Telem Ratio (shared with every
 // other sensor type over the same limited uplink slots) and can easily be
 // several seconds at a conservative ratio. Measured field data (2026-08-14,
-// 150Hz air rate / 1:64 Telem Ratio): genuine GPS updates every ~4.6-4.9s.
-// The previous hardcoded 5000ms sat right on top of that cadence, so any
-// normal jitter (a single dropped/delayed telemetry chunk) pushed an
+// 150Hz air rate / 1:32 (STD) Telem Ratio): genuine GPS updates every
+// ~4.6-4.9s. The previous hardcoded 5000ms sat right on top of that cadence,
+// so any normal jitter (a single dropped/delayed telemetry chunk) pushed an
 // interval over the cutoff and flapped the broadcast off - which a real
 // scanner app can reasonably read as "no live aircraft position available"
 // even while identity/operator fields (learned once, not re-validated every
 // tick) keep showing. If your Telem Ratio is even more conservative than
-// 1:64, raise this further; it should be a solid multiple of your actual
+// 1:32, raise this further; it should be a solid multiple of your actual
 // observed GPS cadence, not just barely above it.
 #define REMOTEID_FIX_STALE_MS 12000
 #endif
@@ -232,6 +236,28 @@ static bool s_haveOperatorId = false;
 #define REMOTEID_DEFAULT_CLASS REMOTEID_CLASS_C0
 #endif
 static uint8_t s_classNum = REMOTEID_DEFAULT_CLASS;
+
+// UTC time source for Location.TimeStamp / System.Timestamp: pushed once per
+// serial (re)connect by the GCS (which has an accurate system clock) via the
+// "T:<unix seconds>" command - see RemoteID_SetTime(). Session-only, RAM-only,
+// same design as the take-off-position snapshot: no NVS persistence, because
+// millis()-since-boot resets on every reboot anyway, and the GCS re-sends it
+// on every connect (including post-reboot) for free. If no GCS ever connects
+// over serial this session, s_haveTime stays false and both timestamp fields
+// report their spec "unknown" value, same as before this feature existed.
+static bool     s_haveTime     = false;
+static uint32_t s_timeBaseUnix = 0;   // unix seconds at the moment of last sync
+static uint32_t s_timeBaseMs   = 0;   // millis() at that same moment
+
+// ODID's System.Timestamp epoch is 00:00:00 01/01/2019 UTC, not the Unix
+// epoch - see opendroneid.h's ODID_System_data.Timestamp comment. Verified via
+// date computation (1970-01-01T00:00:00Z -> 2019-01-01T00:00:00Z = 1546300800s).
+#define REMOTEID_ODID_EPOCH_2019_UNIX 1546300800UL
+
+static uint32_t nowUnix(void)
+{
+    return s_haveTime ? s_timeBaseUnix + (millis() - s_timeBaseMs) / 1000 : 0;
+}
 
 // ---- Location state, fed by CRSF telemetry frames sniffed off-air ----
 // Written by the sink (loop task), read by fillUasData (loop task) - same
@@ -529,8 +555,8 @@ static void fillUasData(ODID_UAS_Data *uas)
     uas->Location.VertAccuracy    = ODID_VER_ACC_UNKNOWN;
     uas->Location.BaroAccuracy    = ODID_VER_ACC_UNKNOWN;
     uas->Location.SpeedAccuracy   = ODID_SPEED_ACC_UNKNOWN;
-    uas->Location.TSAccuracy      = ODID_TIME_ACC_UNKNOWN;
-    uas->Location.TimeStamp       = INV_TIMESTAMP;      // no UTC time source on this data path - see file header
+    uas->Location.TSAccuracy      = ODID_TIME_ACC_UNKNOWN;   // synced once per serial connect, not a live GNSS PPS - don't overclaim precision
+    uas->Location.TimeStamp       = s_haveTime ? (float)(nowUnix() % 3600) : INV_TIMESTAMP;  // seconds after the full hour (spec units), UNKNOWN until a GCS has synced us over serial - see RemoteID_SetTime()
     uas->LocationValid            = s_haveFix ? 1 : 0;
 
     // Operator/take-off location: a STATIC SNAPSHOT latched once at the clean
@@ -556,7 +582,10 @@ static void fillUasData(ODID_UAS_Data *uas)
     } else {
         uas->System.ClassificationType = ODID_CLASSIFICATION_TYPE_UNDECLARED;   // "Legacy" - no class marking
     }
-    uas->System.Timestamp            = 0;               // no UTC time source - see file header
+    // Seconds since the ODID 2019 epoch, UNKNOWN as literal 0 (no sentinel is
+    // defined for this field - see file header) until a GCS has synced us.
+    uas->System.Timestamp            = (s_haveTime && nowUnix() >= REMOTEID_ODID_EPOCH_2019_UNIX)
+                                            ? (nowUnix() - REMOTEID_ODID_EPOCH_2019_UNIX) : 0;
     uas->SystemValid                 = s_haveTakeoff ? 1 : 0;
 
     if (s_haveOperatorId) {
@@ -650,6 +679,22 @@ void RemoteID_SetClass(uint8_t classNum)
     s_prefs.putUChar("class", s_classNum);
     DBGLN("[RID] EU class saved to NVS");
     RemoteID_ReportClass();
+}
+
+// Sync the ODID clock from the GCS's system clock (serial "T:" path only -
+// there's no other UTC source on this data path, see file header). No NVS
+// write: deliberately session-only, re-sent by the GCS on every connect
+// (including after a sniffer reboot), same rationale as the take-off-position
+// snapshot. Loop-task context, called directly from Sniffer_PollSerialCmd().
+void RemoteID_SetTime(uint32_t unixSeconds)
+{
+    s_timeBaseUnix = unixSeconds;
+    s_timeBaseMs   = millis();
+    s_haveTime     = true;
+    // debugPrintf() is a minimal hand-rolled formatter (see logging.cpp) -
+    // only single-char %s/%d/%u/%x/%f, no %l length modifier. %lu here would
+    // silently print garbage ("u" with the value dropped), not a real number.
+    DBGLN("[RID] UTC time synced via serial (unix=%u)", (unsigned)unixSeconds);
 }
 
 void RemoteID_Tick(uint32_t nowMs)

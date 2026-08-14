@@ -224,6 +224,30 @@ int main(void) {
     printf("PASS: Location.Status mapping (%zu cases, incl. GROUND vs AIRBORNE on disarmed)\n",
            sizeof(statusCases)/sizeof(statusCases[0]));
 
-    printf("\nALL CHECKS PASSED\n");
+    // --- Serial time-sync math, mirrors the EXACT expressions in fillUasData()
+    // for Location.TimeStamp (seconds after the full hour) and System.Timestamp
+    // (seconds since 2019-01-01T00:00:00Z, REMOTEID_ODID_EPOCH_2019_UNIX).
+    // 1546300800 verified via date computation (2019-01-01T00:00:00Z - Unix
+    // epoch), including the leap-year count over 1970..2019.
+    #define REMOTEID_ODID_EPOCH_2019_UNIX 1546300800UL
+    struct { uint32_t unixSecs; uint32_t expectSysTs; float expectLocTs; const char *why; } tsCases[] = {
+        {1546300800UL, 0,    0.0f,    "exactly the 2019 epoch -> System.Timestamp=0"},
+        {1546300801UL, 1,    1.0f,    "1s after epoch"},
+        {1546304400UL, 3600, 0.0f,    "exactly 1h after epoch -> wraps to 0 within the hour"},
+        {1546302645UL, 1845, 1845.0f, "30:45 past the hour -> 1845s into the hour"},
+    };
+    for (size_t i = 0; i < sizeof(tsCases)/sizeof(tsCases[0]); i++) {
+        uint32_t sysTs = (tsCases[i].unixSecs >= REMOTEID_ODID_EPOCH_2019_UNIX)
+                              ? (tsCases[i].unixSecs - REMOTEID_ODID_EPOCH_2019_UNIX) : 0;
+        float locTs = (float)(tsCases[i].unixSecs % 3600);
+        if (sysTs != tsCases[i].expectSysTs || !approx(locTs, tsCases[i].expectLocTs, 1e-6)) {
+            printf("FAIL: time-sync(unix=%lu) sysTs=%lu locTs=%.1f, expected sysTs=%lu locTs=%.1f (%s)\n",
+                   (unsigned long)tsCases[i].unixSecs, (unsigned long)sysTs, locTs,
+                   (unsigned long)tsCases[i].expectSysTs, tsCases[i].expectLocTs, tsCases[i].why);
+            return 1;
+        }
+    }
+    printf("PASS: serial time-sync epoch/hour-wrap math (%zu cases)\n",
+           sizeof(tsCases)/sizeof(tsCases[0]));
     return 0;
 }

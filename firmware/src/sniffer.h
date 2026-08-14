@@ -111,6 +111,13 @@ void RemoteID_SetClass(uint8_t classNum);
 // Print the current EU class as a machine-parseable line ("[RID] CLASS=C0" or "LEGACY").
 void RemoteID_ReportClass(void);
 
+// Sync the ODID clock from a UTC unix-seconds value pushed over serial (mirrors
+// the BLE "T:<unix seconds>" idea but this data path is serial-only - see
+// RemoteID_SetTime() in devTransport_RemoteID.cpp for why). Session-only, not
+// persisted: re-sent by the GCS on every serial (re)connect, including after
+// a sniffer reboot, same as the take-off-position snapshot design.
+void RemoteID_SetTime(uint32_t unixSeconds);
+
 #ifdef __cplusplus
 }
 #endif

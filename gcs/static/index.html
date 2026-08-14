@@ -346,6 +346,10 @@ function renderSources(d){
     // only; a no-op on non-RemoteID builds, which simply never reply).
     setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_operator_id'})); }catch(e){} }, 1000);
     setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_class'})); }catch(e){} }, 1200);
+    // Push this machine's UTC clock so ODID Location/System timestamps aren't
+    // always "unknown" (firmware has no RTC/GPS-time source of its own).
+    // Write-only, server stamps its own time.time() - see TransportManager.send_time.
+    setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'set_time'})); }catch(e){} }, 1400);
   }
   lastSrcStatus = s.status;
   // Recordings folder: server-authoritative, persisted across restarts (see
