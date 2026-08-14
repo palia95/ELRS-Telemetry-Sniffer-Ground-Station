@@ -145,6 +145,25 @@ extern "C" {
 #ifndef REMOTEID_BROADCAST_PERIOD_MS
 #define REMOTEID_BROADCAST_PERIOD_MS 1000   // ASTM F3411: Location >= 1 Hz while airborne
 #endif
+#ifndef REMOTEID_FIX_STALE_MS
+// How long without a new GPS frame before s_haveFix is cleared and the WAIT
+// state pauses the broadcast entirely (see RemoteID_Tick). MUST be
+// comfortably larger than the real inter-GPS-frame interval this ELRS link
+// can achieve, not an idealized "GPS is ~1Hz" assumption - that interval is
+// entirely a function of the TX's configured Telem Ratio (shared with every
+// other sensor type over the same limited uplink slots) and can easily be
+// several seconds at a conservative ratio. Measured field data (2026-08-14,
+// 150Hz air rate / 1:64 Telem Ratio): genuine GPS updates every ~4.6-4.9s.
+// The previous hardcoded 5000ms sat right on top of that cadence, so any
+// normal jitter (a single dropped/delayed telemetry chunk) pushed an
+// interval over the cutoff and flapped the broadcast off - which a real
+// scanner app can reasonably read as "no live aircraft position available"
+// even while identity/operator fields (learned once, not re-validated every
+// tick) keep showing. If your Telem Ratio is even more conservative than
+// 1:64, raise this further; it should be a solid multiple of your actual
+// observed GPS cadence, not just barely above it.
+#define REMOTEID_FIX_STALE_MS 12000
+#endif
 #ifndef REMOTEID_CONFIG_WINDOW_MS
 // After boot, advertise ONLY the connectable config instance for this long so a
 // phone can reliably connect and set the Operator ID. The ODID broadcast
@@ -341,10 +360,15 @@ static void RemoteID_sink(const uint8_t *frame, uint8_t len)
         s_haveFix    = (s_lat != 0.0 || s_lon != 0.0);
 
         // GPS-derived vertical speed (fallback when no vario/baro telemetry).
+        // Upper dt bound shares REMOTEID_FIX_STALE_MS's reasoning (see its
+        // comment) rather than an idealized "GPS is ~1Hz" assumption - a
+        // hardcoded 5.0f here sat right on top of the real ~4.6-4.9s cadence
+        // measured at 1:64 Telem Ratio and would intermittently skip valid
+        // updates for no reason.
         uint32_t now = millis();
         if (s_lastGpsAltMs != 0) {
             float dt = (now - s_lastGpsAltMs) / 1000.0f;
-            if (dt >= 0.15f && dt < 5.0f && (now - s_vspeedTeleMs) > 3000) {   // vario stale -> use GPS
+            if (dt >= 0.15f && dt < (REMOTEID_FIX_STALE_MS / 1000.0f) && (now - s_vspeedTeleMs) > 3000) {
                 s_vspeedMs = (s_altM - s_lastGpsAltM) / dt;
             }
         }
@@ -684,8 +708,10 @@ void RemoteID_Tick(uint32_t nowMs)
     last = nowMs;
 
     // GPS telemetry is only as fresh as the last sniffed CRSF GPS frame;
-    // if the sniffer lost lock on the RC link, stop claiming a fix.
-    if (s_haveFix && (nowMs - s_lastFixMs) > 5000) s_haveFix = false;
+    // if the sniffer lost lock on the RC link, stop claiming a fix. See
+    // REMOTEID_FIX_STALE_MS's comment - this must stay comfortably above the
+    // real achievable GPS cadence for this link, not a hardcoded guess.
+    if (s_haveFix && (nowMs - s_lastFixMs) > REMOTEID_FIX_STALE_MS) s_haveFix = false;
 
     // WAIT state: no drone telemetry (no GPS fix, ever or currently) means we
     // have nothing real to report. Broadcasting a Basic-ID-only "drone" with an
