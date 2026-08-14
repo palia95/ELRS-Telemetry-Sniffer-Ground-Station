@@ -460,6 +460,32 @@ Any other value (`C:2`..`C:6`, garbage) is rejected by the firmware and
 ignored — the stored value never changes. Persisted to NVS like the Operator
 ID, survives reboots, defaults to C0 on first boot / if NVS is empty.
 
+### 8.5 Per‑PHY broadcast enable: Legacy / Coded, independently toggleable
+
+Both advertising instances (§2) default **on**, but each can be disabled
+independently at runtime — **serial only**, not BLE (unlike Operator ID/class):
+the config window's whole reason to exist is being reachable, so it can't
+itself depend on which PHYs happen to be enabled at the time.
+
+- **Serial:** `L:1`/`L:0` (Legacy) and `R:1`/`R:0` (Coded PHY/Long Range) to
+  set; `L?`/`R?` to read → `[RID] LEGACY=ON|OFF` / `[RID] CODED=ON|OFF`.
+- **GCS:** two checkboxes ("Legacy (BLE4)" / "Coded PHY / Long Range") next to
+  the class control, synced on connect and on every change.
+- Persisted to NVS, survives reboots. Disabling an instance that's currently
+  advertising stops it immediately rather than waiting for the next
+  fix‑loss/regain cycle to notice.
+
+**Know the trade‑off before disabling either:** Legacy is what nearly every
+scanner can receive at all (all iOS — Apple provides no API to scan Coded PHY,
+full stop — plus older/non‑Coded‑capable Android). Coded PHY only reaches the
+subset of Android phones with LE Coded PHY scanning support (see
+`../../remote-id/PLAN.md` §9 for the full compatibility breakdown). Turning
+off Legacy means iPhones and most Android phones see **nothing** — not just
+reduced range, the broadcast is invisible to them. This is a real,
+consequential choice, not a cosmetic setting — it exists so *you* can make
+that call for your situation, not because either default should normally
+change.
+
 ---
 
 ## 9. Compliance status — what's done, what's missing
@@ -577,8 +603,21 @@ and the GCS re‑syncs it on every reconnect for free, including post‑reboot.
 If no GCS ever connects over serial this session (BLE‑only flight, no
 cable), both fields still honestly report "unknown" rather than a fake time.
 
-**Not yet confirmed against a real flight** — this is the mechanism most
-consistent with the evidence gathered, not a proven fix. Re‑test with
-DroneTag (and ideally the OpenDroneID Android reference app as a second,
-independent receiver) is the next step once this build is flashed and
-verified on the bench.
+**Confirmed fixed (2026‑08‑14 field retest): DroneTag now shows the
+aircraft's live position.** The missing UTC timestamp was the actual root
+cause, not just the leading suspect.
+
+### 13.1 Related: DroneTag doesn't display EU classification (not a firmware bug)
+
+Same field test surfaced a second DroneTag gap: "Class"/"Category" always
+show `--`, even though the module is configured for C0 (§8.4) and the
+System message that carries `ClassificationType`/`CategoryEU`/`ClassEU` is
+confirmed reaching DroneTag (its Operator ID and Operator location — both
+from that same message — display correctly).
+
+Verified **not our bug**: a real over‑the‑air capture (nRF Connect raw hex)
+was decoded byte‑for‑byte against the actual `opendroneid-core-c` decoder —
+`ClassificationType=1` (EU), `CategoryEU=1` (Open), `ClassEU=1` (C0), exactly
+as expected. The classification bytes are correctly on the air; this is a
+DroneTag‑side rendering/decode gap, not something fixable from the firmware
+side. No firmware change made for this.

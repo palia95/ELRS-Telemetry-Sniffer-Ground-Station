@@ -50,6 +50,8 @@ CSV_FIELDS = [
 _HEX_LINE = re.compile(r"\[CRSF\]\s*([0-9a-fA-F ]+)")
 _OPID_LINE = re.compile(r"\[RID\]\s*OPID=(.*)")   # Remote ID firmware: current Operator ID
 _CLASS_LINE = re.compile(r"\[RID\]\s*CLASS=(C0|LEGACY)")   # Remote ID firmware: EU class (only these two)
+_LEGACY_LINE = re.compile(r"\[RID\]\s*LEGACY=(ON|OFF)")    # Remote ID firmware: Legacy PHY broadcast enabled
+_CODED_LINE = re.compile(r"\[RID\]\s*CODED=(ON|OFF)")      # Remote ID firmware: Coded PHY broadcast enabled
 _ADDR_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$|^[0-9A-Fa-f\-]{36}$")
 
 
@@ -282,6 +284,33 @@ class TransportManager:
             self._tx.put(payload)
             print("[gcs] queued UTC time sync over serial")
 
+    async def send_legacy_enabled(self, enabled):
+        """Enable/disable the Legacy (1M PHY) ODID broadcast ("L:0|1"). Serial
+        only - see RemoteID_SetLegacyEnabled() for why. Disabling it means
+        nearly all iOS and older-Android scanners won't see the broadcast at
+        all - see docs before flipping this off in the field."""
+        if self.kind == "serial":
+            self._tx.put(("L:" + ("1" if enabled else "0") + "\n").encode())
+            print(f"[gcs] queued Legacy PHY {'ON' if enabled else 'OFF'} over serial")
+
+    async def request_legacy_enabled(self):
+        if self.kind == "serial":
+            self._tx.put(b"L?\n")
+            print("[gcs] requested Legacy PHY state over serial")
+
+    async def send_coded_enabled(self, enabled):
+        """Enable/disable the Coded PHY / Long Range ODID broadcast ("R:0|1").
+        Serial only. Only a subset of Android phones can scan Coded PHY at
+        all - see docs before disabling the other PHY along with this one."""
+        if self.kind == "serial":
+            self._tx.put(("R:" + ("1" if enabled else "0") + "\n").encode())
+            print(f"[gcs] queued Coded PHY {'ON' if enabled else 'OFF'} over serial")
+
+    async def request_coded_enabled(self):
+        if self.kind == "serial":
+            self._tx.put(b"R?\n")
+            print("[gcs] requested Coded PHY state over serial")
+
     def mark(self, status, desc=None):
         self.status = status
         if desc is not None:
@@ -365,6 +394,14 @@ def serial_reader(hub, port, baud, stop, mgr):
                         mc = _CLASS_LINE.search(s_line)
                         if mc:
                             hub.push_class(1 if mc.group(1) == "C0" else 0)
+                            continue
+                        ml = _LEGACY_LINE.search(s_line)
+                        if ml:
+                            hub.push_legacy_enabled(ml.group(1) == "ON")
+                            continue
+                        mr = _CODED_LINE.search(s_line)
+                        if mr:
+                            hub.push_coded_enabled(mr.group(1) == "ON")
                             continue
                         m = _HEX_LINE.search(s_line)
                         if not m:
@@ -473,6 +510,16 @@ class Hub:
         msg = json.dumps({"type": "class", "value": class_num})
         self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_all(msg)))
 
+    def push_legacy_enabled(self, enabled):
+        """Thread-safe: broadcast the device's current Legacy PHY enable state."""
+        msg = json.dumps({"type": "legacy_enabled", "value": enabled})
+        self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_all(msg)))
+
+    def push_coded_enabled(self, enabled):
+        """Thread-safe: broadcast the device's current Coded PHY enable state."""
+        msg = json.dumps({"type": "coded_enabled", "value": enabled})
+        self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send_all(msg)))
+
     async def process_loop(self):
         while True:
             frame = await self.queue.get()
@@ -561,6 +608,14 @@ async def ws_handler(request):
                 await hub.mgr.request_class()
             elif c == "set_time":
                 await hub.mgr.send_time()
+            elif c == "set_legacy_enabled":
+                await hub.mgr.send_legacy_enabled(bool(cmd.get("enabled", True)))
+            elif c == "get_legacy_enabled":
+                await hub.mgr.request_legacy_enabled()
+            elif c == "set_coded_enabled":
+                await hub.mgr.send_coded_enabled(bool(cmd.get("enabled", True)))
+            elif c == "get_coded_enabled":
+                await hub.mgr.request_coded_enabled()
             elif c == "log":
                 if cmd.get("on"):
                     print(f"[gcs] logging -> {hub.logger.start()}")

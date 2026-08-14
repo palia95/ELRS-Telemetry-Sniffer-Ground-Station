@@ -118,6 +118,16 @@ void RemoteID_ReportClass(void);
 // a sniffer reboot, same as the take-off-position snapshot design.
 void RemoteID_SetTime(uint32_t unixSeconds);
 
+// Enable/disable the Legacy (1M PHY, instance 0) and Coded/Long-Range PHY
+// (instance 1) ODID broadcasts independently at runtime - serial "L:0|1" and
+// "R:0|1" only (see docs for the iOS/Android compatibility trade-off of
+// disabling either). Both default on. Persists to NVS. Safe to call from the
+// loop task; stops the instance immediately if disabling.
+void RemoteID_SetLegacyEnabled(bool en);
+void RemoteID_ReportLegacyEnabled(void);   // "[RID] LEGACY=ON" or "OFF"
+void RemoteID_SetCodedEnabled(bool en);
+void RemoteID_ReportCodedEnabled(void);    // "[RID] CODED=ON" or "OFF"
+
 #ifdef __cplusplus
 }
 #endif
