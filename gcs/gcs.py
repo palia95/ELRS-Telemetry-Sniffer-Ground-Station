@@ -269,6 +269,19 @@ class TransportManager:
             self._tx.put(b"C?\n")
             print("[gcs] requested EU class over serial")
 
+    async def send_time(self):
+        """Push this machine's current UTC time to the Remote ID firmware
+        ("T:<unix seconds>") so Location/System ODID timestamps aren't always
+        "unknown". Uses the GCS host clock (not the firmware's, which has no
+        RTC/GPS-time source of its own) - see RemoteID_SetTime() on the
+        firmware side. Serial only: no BLE characteristic for this, matching
+        the user's explicit "if present [on serial]" scope. Write-only, no
+        request_time() - the firmware doesn't echo it back."""
+        if self.kind == "serial":
+            payload = ("T:" + str(int(time.time())) + "\n").encode()
+            self._tx.put(payload)
+            print("[gcs] queued UTC time sync over serial")
+
     def mark(self, status, desc=None):
         self.status = status
         if desc is not None:
@@ -546,6 +559,8 @@ async def ws_handler(request):
                 await hub.mgr.send_class(cmd.get("class_num", 0))
             elif c == "get_class":
                 await hub.mgr.request_class()
+            elif c == "set_time":
+                await hub.mgr.send_time()
             elif c == "log":
                 if cmd.get("on"):
                     print(f"[gcs] logging -> {hub.logger.start()}")
