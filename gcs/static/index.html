@@ -61,6 +61,7 @@
     <div class="status"><span id="rxAge">—</span></div>
     <div class="grow"></div>
     <div class="status" id="framesTxt">0 frames</div>
+    <button id="clearBtn" title="Clear the displayed readings (map trail, gauges, panel values) - does not affect a recording in progress">Clear</button>
     <button id="recBtn">● Record</button>
   </header>
 
@@ -147,6 +148,11 @@
       <div class="k">LQ</div><div class="v" id="lq">—</div>
     </div>
 
+    <div class="row">
+      <input id="logDir" type="text" placeholder="Recordings folder" autocomplete="off" spellcheck="false"/>
+      <button id="logDirBrowse" style="display:none">Browse…</button>
+      <button id="logDirSet">Set</button>
+    </div>
     <div class="foot" id="logFoot">Not recording.</div>
     <div class="foot">RSSI/LQ here are only populated if the aircraft sends a
       LINK_STATISTICS frame. The sniffer's own receive RSSI/LQ is shown on the
@@ -342,6 +348,9 @@ function renderSources(d){
     setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_class'})); }catch(e){} }, 1200);
   }
   lastSrcStatus = s.status;
+  // Recordings folder: server-authoritative, persisted across restarts (see
+  // gcs.py _settings_path). Don't clobber the field while the user is typing.
+  if(d.log_dir!==undefined && document.activeElement!==$('logDir')) $('logDir').value = d.log_dir;
   // serial dropdown (keep current selection if still valid)
   const sel = $('serialSel'), cur = sel.value;
   sel.innerHTML = '<option value="">— serial ports —</option>' +
@@ -409,6 +418,41 @@ $('classBtn').onclick = ()=>{
   $('classFoot').textContent = 'Sent — saving to device NVS…';
 };
 $('classRead').onclick = ()=>{ ws.send(JSON.stringify({cmd:'get_class'})); $('classFoot').textContent='Reading…'; };
+
+// ---- Recordings folder: set once, persisted server-side across restarts ----
+function setLogDir(path){
+  path = (path||'').trim();
+  if(!path) return;
+  ws.send(JSON.stringify({cmd:'set_log_dir', dir:path}));
+}
+$('logDirSet').onclick = ()=> setLogDir($('logDir').value);
+$('logDir').addEventListener('keydown', e=>{ if(e.key==='Enter') setLogDir($('logDir').value); });
+// Native folder picker only exists inside the packaged app (pywebview); a
+// plain browser tab has no such API, so the button stays hidden there and
+// typing/pasting a path into the text field is the only way in that mode.
+function enableNativeBrowse(){
+  $('logDirBrowse').style.display = '';
+  $('logDirBrowse').onclick = async ()=>{
+    try{
+      const path = await window.pywebview.api.choose_log_dir();
+      if(path){ $('logDir').value = path; setLogDir(path); }
+    }catch(e){ console.error('choose_log_dir failed', e); }
+  };
+}
+if(window.pywebview) enableNativeBrowse();
+else window.addEventListener('pywebviewready', enableNativeBrowse);
+
+// ---- Clear displayed readings (map trail, gauges, panel) - does not touch
+// a recording in progress or the server-side frame counter, which will just
+// repopulate on the next telemetry message. ----
+$('clearBtn').onclick = ()=>{
+  for(const k in model) delete model[k];
+  tlmAge = null;
+  if(marker){ map.removeLayer(marker); marker = null; }
+  trail.setLatLngs([]);
+  havePos = false;
+  redraw();
+};
 
 connect();
 redraw();
