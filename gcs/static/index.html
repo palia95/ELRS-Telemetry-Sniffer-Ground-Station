@@ -100,6 +100,11 @@
         <button id="classRead">Read</button>
       </div>
       <div class="foot" id="classFoot" style="margin-top:2px"></div>
+      <div class="row" style="gap:12px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px"><input id="legacyEn" type="checkbox" checked/> Legacy (BLE4)</label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px"><input id="codedEn" type="checkbox" checked/> Coded PHY / Long Range</label>
+      </div>
+      <div class="foot" id="phyFoot" style="margin-top:2px">Disabling a PHY stops nearly all iOS (Legacy) or most Android (Coded) scanners from seeing the broadcast at all - see docs before flipping either off in the field.</div>
       <div class="row" id="bleHdr" style="display:none">
         <span>BLE devices <span id="bleCount"></span></span>
         <span id="bleToggle">▾</span>
@@ -318,6 +323,8 @@ function connect(){
       $('classFoot').textContent = 'Current: ' + (d.value===1 ? 'C0' : 'Legacy (no class marking)');
       return;
     }
+    if(d.type==='legacy_enabled'){ $('legacyEn').checked = !!d.value; return; }
+    if(d.type==='coded_enabled'){ $('codedEn').checked = !!d.value; return; }
     if(d.type!=='telemetry') return;
     lastRx = Date.now();
     if('tlm_age' in d) tlmAge = d.tlm_age;
@@ -350,6 +357,8 @@ function renderSources(d){
     // always "unknown" (firmware has no RTC/GPS-time source of its own).
     // Write-only, server stamps its own time.time() - see TransportManager.send_time.
     setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'set_time'})); }catch(e){} }, 1400);
+    setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_legacy_enabled'})); }catch(e){} }, 1600);
+    setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_coded_enabled'})); }catch(e){} }, 1800);
   }
   lastSrcStatus = s.status;
   // Recordings folder: server-authoritative, persisted across restarts (see
@@ -422,6 +431,16 @@ $('classBtn').onclick = ()=>{
   $('classFoot').textContent = 'Sent — saving to device NVS…';
 };
 $('classRead').onclick = ()=>{ ws.send(JSON.stringify({cmd:'get_class'})); $('classFoot').textContent='Reading…'; };
+
+// ---- Per-PHY broadcast enable (Remote ID firmware, both default on) ----
+$('legacyEn').onchange = ()=>{
+  ws.send(JSON.stringify({cmd:'set_legacy_enabled', enabled: $('legacyEn').checked}));
+  $('phyFoot').textContent = 'Sent — saving to device NVS…';
+};
+$('codedEn').onchange = ()=>{
+  ws.send(JSON.stringify({cmd:'set_coded_enabled', enabled: $('codedEn').checked}));
+  $('phyFoot').textContent = 'Sent — saving to device NVS…';
+};
 
 // ---- Recordings folder: set once, persisted server-side across restarts ----
 function setLogDir(path){

@@ -242,10 +242,12 @@ static void Sniffer_EmitLinkStats()
 static volatile bool s_ghostReady = false;
 
 // Accept "P:<phrase>\n" (set binding phrase) and, on the Remote ID build,
-// "O:<operator id>\n" / "O?" (Operator ID) and "C:<0..6>\n" / "C?" (EU class)
-// on the debug serial (USBSerial) so the host can configure over the cable,
-// exactly like the BLE characteristics. Non-blocking line accumulator;
-// ignores anything that isn't a known command.
+// "O:<operator id>\n" / "O?" (Operator ID), "C:<0|1>\n" / "C?" (EU class),
+// "T:<unix seconds>\n" (UTC time sync), and "L:<0|1>\n" / "L?" +
+// "R:<0|1>\n" / "R?" (Legacy / Coded-PHY broadcast enable) on the debug
+// serial (USBSerial) so the host can configure over the cable, exactly like
+// the BLE characteristics (T/L/R are serial-only - see their definitions).
+// Non-blocking line accumulator; ignores anything that isn't a known command.
 static void Sniffer_PollSerialCmd()
 {
     if (!SerialLogger) return;
@@ -291,6 +293,24 @@ static void Sniffer_PollSerialCmd()
                 line[idx] = 0;
                 uint32_t unixSecs = (uint32_t)strtoul(line + 2, nullptr, 10);
                 if (unixSecs > 0) RemoteID_SetTime(unixSecs);
+            }
+            else if (idx >= 3 && line[0] == 'L' && line[1] == ':' && (line[2] == '0' || line[2] == '1'))
+            {
+                // "L:0|1" - enable/disable the Legacy (1M PHY) ODID broadcast.
+                RemoteID_SetLegacyEnabled(line[2] == '1');
+            }
+            else if (idx >= 2 && line[0] == 'L' && line[1] == '?')
+            {
+                RemoteID_ReportLegacyEnabled();     // host/GCS reads back "[RID] LEGACY=ON/OFF"
+            }
+            else if (idx >= 3 && line[0] == 'R' && line[1] == ':' && (line[2] == '0' || line[2] == '1'))
+            {
+                // "R:0|1" - enable/disable the Coded PHY (Long Range) ODID broadcast.
+                RemoteID_SetCodedEnabled(line[2] == '1');
+            }
+            else if (idx >= 2 && line[0] == 'R' && line[1] == '?')
+            {
+                RemoteID_ReportCodedEnabled();      // host/GCS reads back "[RID] CODED=ON/OFF"
             }
 #endif
             idx = 0;

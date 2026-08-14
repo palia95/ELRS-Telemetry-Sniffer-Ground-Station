@@ -237,6 +237,18 @@ static bool s_haveOperatorId = false;
 #endif
 static uint8_t s_classNum = REMOTEID_DEFAULT_CLASS;
 
+// Per-PHY broadcast enable, user-configurable (serial only - "L:"/"R:", see
+// Sniffer_PollSerialCmd), persisted to NVS. Both default on (current/original
+// behavior). Legacy is what nearly every scanner can receive (all iOS, older
+// Android - see file header); Coded PHY/Long Range is the subset of Android
+// that supports it. Disabling one is a deliberate compatibility trade-off the
+// user makes at runtime, not a build-time decision - see docs §2 for why both
+// are on by default. Not exposed over BLE (unlike Operator ID/class): the
+// config window's whole point is being reachable, so it can't itself depend
+// on which PHYs happen to be enabled at the time.
+static bool s_legacyEnabled = true;
+static bool s_codedEnabled  = true;
+
 // UTC time source for Location.TimeStamp / System.Timestamp: pushed once per
 // serial (re)connect by the GCS (which has an accurate system clock) via the
 // "T:<unix seconds>" command - see RemoteID_SetTime(). Session-only, RAM-only,
@@ -681,6 +693,34 @@ void RemoteID_SetClass(uint8_t classNum)
     RemoteID_ReportClass();
 }
 
+// Machine-parseable per-PHY enable lines for a host/GCS reading the debug
+// serial ("[RID] LEGACY=ON/OFF", "[RID] CODED=ON/OFF").
+void RemoteID_ReportLegacyEnabled(void) { DBGLN("[RID] LEGACY=%s", s_legacyEnabled ? "ON" : "OFF"); }
+void RemoteID_ReportCodedEnabled(void)  { DBGLN("[RID] CODED=%s",  s_codedEnabled  ? "ON" : "OFF"); }
+
+// Set + persist per-PHY broadcast enable (serial "L:"/"R:" path). Loop-task
+// context (NVS write). If disabling an instance that's currently up, stop it
+// immediately - RemoteID_Tick simply skips re-arming a disabled instance each
+// tick, it doesn't proactively stop one that was already advertising, so
+// without this an instance you just turned off would keep broadcasting its
+// last data until the next fix-loss/regain cycle happened to stop it anyway.
+void RemoteID_SetLegacyEnabled(bool en)
+{
+    s_legacyEnabled = en;
+    s_prefs.putBool("legacyEn", en);
+    if (!en && s_adv) s_adv->stop(0);
+    DBGLN("[RID] Legacy PHY %s, saved to NVS", en ? "enabled" : "disabled");
+    RemoteID_ReportLegacyEnabled();
+}
+void RemoteID_SetCodedEnabled(bool en)
+{
+    s_codedEnabled = en;
+    s_prefs.putBool("codedEn", en);
+    if (!en && s_adv) s_adv->stop(1);
+    DBGLN("[RID] Coded PHY (Long Range) %s, saved to NVS", en ? "enabled" : "disabled");
+    RemoteID_ReportCodedEnabled();
+}
+
 // Sync the ODID clock from the GCS's system clock (serial "T:" path only -
 // there's no other UTC source on this data path, see file header). No NVS
 // write: deliberately session-only, re-sent by the GCS on every connect
@@ -793,30 +833,37 @@ void RemoteID_Tick(uint32_t nowMs)
     // Bias toward Location (the only ASTM-mandated >=1Hz field): 2 of every
     // 3 ticks send Location, the 3rd alternates Basic ID / System so
     // Legacy-only scanners still see identity, not just position.
-    ODID_Message_encoded single;
-    static uint8_t rr = 0;
-    static bool sendBasicIdNext = true;
-    rr = (rr + 1) % 3;
-    int ok = -1;
-    if (rr == 2) {
-        if (sendBasicIdNext && uas.BasicIDValid[0])
-            ok = encodeBasicIDMessage(&single.basicId, &uas.BasicID[0]);
-        else if (uas.SystemValid)
-            ok = encodeSystemMessage(&single.system, &uas.System);
-        sendBasicIdNext = !sendBasicIdNext;
-    }
-    if (ok != ODID_SUCCESS && uas.LocationValid)
-        ok = encodeLocationMessage(&single.location, &uas.Location);
+    // Runtime-toggleable (s_legacyEnabled, "L:" serial command / GCS) - if
+    // it's off there's nothing to build; RemoteID_SetLegacyEnabled already
+    // stopped the instance itself when it was switched off.
+    if (s_legacyEnabled) {
+        ODID_Message_encoded single;
+        static uint8_t rr = 0;
+        static bool sendBasicIdNext = true;
+        rr = (rr + 1) % 3;
+        int ok = -1;
+        if (rr == 2) {
+            if (sendBasicIdNext && uas.BasicIDValid[0])
+                ok = encodeBasicIDMessage(&single.basicId, &uas.BasicID[0]);
+            else if (uas.SystemValid)
+                ok = encodeSystemMessage(&single.system, &uas.System);
+            sendBasicIdNext = !sendBasicIdNext;
+        }
+        if (ok != ODID_SUCCESS && uas.LocationValid)
+            ok = encodeLocationMessage(&single.location, &uas.Location);
 
-    if (ok == ODID_SUCCESS) {
-        uint8_t legacyPayload[2 + ODID_MESSAGE_SIZE];
-        legacyPayload[0] = ODID_AD_APP_CODE;
-        legacyPayload[1] = s_msgCounter;
-        memcpy(legacyPayload + 2, single.rawData, ODID_MESSAGE_SIZE);
-        setServiceDataInstance(0, legacyPayload, sizeof(legacyPayload), /*legacy=*/true, BLE_HCI_LE_PHY_1M);
+        if (ok == ODID_SUCCESS) {
+            uint8_t legacyPayload[2 + ODID_MESSAGE_SIZE];
+            legacyPayload[0] = ODID_AD_APP_CODE;
+            legacyPayload[1] = s_msgCounter;
+            memcpy(legacyPayload + 2, single.rawData, ODID_MESSAGE_SIZE);
+            setServiceDataInstance(0, legacyPayload, sizeof(legacyPayload), /*legacy=*/true, BLE_HCI_LE_PHY_1M);
+        }
     }
 
     // Instance 1 (Long Range, Coded PHY): full pack in one extended advert.
+    // Runtime-toggleable (s_codedEnabled, "R:" serial command / GCS).
+    if (!s_codedEnabled) return;
     uint8_t packPayload[2 + 3 + ODID_PACK_MAX_MESSAGES * ODID_MESSAGE_SIZE];
     packPayload[0] = ODID_AD_APP_CODE;
     packPayload[1] = s_msgCounter;
@@ -847,6 +894,11 @@ void RemoteID_Transport_Init(void)
     if (s_classNum != REMOTEID_CLASS_LEGACY && s_classNum != REMOTEID_CLASS_C0)
         s_classNum = REMOTEID_DEFAULT_CLASS;   // guard against garbage/stale NVS
     RemoteID_ReportClass();        // emit parseable CLASS= line at boot for a GCS
+
+    s_legacyEnabled = s_prefs.getBool("legacyEn", true);
+    s_codedEnabled  = s_prefs.getBool("codedEn", true);
+    RemoteID_ReportLegacyEnabled(); // emit parseable LEGACY= line at boot for a GCS
+    RemoteID_ReportCodedEnabled();  // emit parseable CODED= line at boot for a GCS
 
     s_adv = NimBLEDevice::getAdvertising();
     // MUST set ext-adv callbacks: NimBLEExtAdvertising's constructor leaves
