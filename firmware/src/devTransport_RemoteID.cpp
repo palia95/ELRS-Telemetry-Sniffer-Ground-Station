@@ -395,7 +395,19 @@ static void RemoteID_sink(const uint8_t *frame, uint8_t len)
         s_altM       = (float)((int32_t)be16u(p + 12) - 1000); // m
         s_sats       = p[14];
         s_lastFixMs  = millis();
-        s_haveFix    = (s_lat != 0.0 || s_lon != 0.0);
+        // A nonzero lat/lon alone is NOT proof of a real fix: Betaflight's
+        // crsfFrameGps() sends whatever gpsSol currently holds every frame,
+        // regardless of fix status - that can be a stale/cached position from
+        // before losing lock, or (on some GPS drivers) a leftover nonzero
+        // value even before the first real fix. Satellite count is tracked
+        // separately in the same frame and is a real fix-quality signal, so
+        // require both: a plausible coordinate AND a minimum sat count. 6,
+        // not the bare 4-sat 3D-fix minimum: matches this file's existing
+        // HorizAccuracy>=6 "good fix" cutoff below, and Betaflight's own GPS
+        // Rescue arm-readiness gate defaults considerably higher still
+        // (commonly 8) - 6 is a reasonable middle ground, not an idealized
+        // minimum.
+        s_haveFix    = (s_sats >= 6) && (s_lat != 0.0 || s_lon != 0.0);
 
         // GPS-derived vertical speed (fallback when no vario/baro telemetry).
         // Upper dt bound shares REMOTEID_FIX_STALE_MS's reasoning (see its
@@ -563,7 +575,10 @@ static void fillUasData(ODID_UAS_Data *uas)
     uas->Location.HeightType      = ODID_HEIGHT_REF_OVER_TAKEOFF;
     // Height above take-off = current geodetic altitude - latched take-off altitude.
     uas->Location.Height          = (s_haveTakeoff && s_takeoffAltM > -1000) ? (s_altM - s_takeoffAltM) : -1000;
-    uas->Location.HorizAccuracy   = createEnumHorizontalAccuracy(s_sats >= 6 ? 10.0f : 92.6f);
+    // Threshold raised above s_haveFix's own >=6 sat gate (see RemoteID_sink)
+    // so this stays a meaningful distinction instead of always taking the
+    // same branch - anything broadcasting already has >=6 sats by definition.
+    uas->Location.HorizAccuracy   = createEnumHorizontalAccuracy(s_sats >= 8 ? 10.0f : 92.6f);
     uas->Location.VertAccuracy    = ODID_VER_ACC_UNKNOWN;
     uas->Location.BaroAccuracy    = ODID_VER_ACC_UNKNOWN;
     uas->Location.SpeedAccuracy   = ODID_SPEED_ACC_UNKNOWN;
