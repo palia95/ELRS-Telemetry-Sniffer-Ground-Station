@@ -249,5 +249,32 @@ int main(void) {
     }
     printf("PASS: serial time-sync epoch/hour-wrap math (%zu cases)\n",
            sizeof(tsCases)/sizeof(tsCases[0]));
+
+    // --- Fix-validity gate, mirrors the EXACT expression in RemoteID_sink()'s
+    // CRSF_FRAMETYPE_GPS case. A nonzero lat/lon alone is NOT proof of a real
+    // fix - Betaflight's crsfFrameGps() sends whatever gpsSol currently holds
+    // every frame regardless of fix status, which can be a stale/cached
+    // position from before losing lock. Real bug found 2026-08-14 field
+    // testing: broadcast started while disarmed with no real GPS lock,
+    // because only lat/lon!=0 was checked, never sat count.
+    struct { double lat, lon; uint8_t sats; int expectHaveFix; const char *why; } fixCases[] = {
+        {0.0, 0.0, 0,  0, "no coords, no sats -> no fix (never had one)"},
+        {45.0, 9.0, 0, 0, "stale/cached nonzero coords but 0 sats -> not a real fix"},
+        {45.0, 9.0, 5, 0, "5 sats is below the sniffer's fix-acceptance floor -> not a real fix"},
+        {45.0, 9.0, 6, 1, "6 sats + real coords -> fix accepted"},
+        {45.0, 9.0, 11,1, "plenty of sats + real coords -> fix"},
+        {0.0, 0.0, 11,0, "sats present but coords still exactly 0,0 -> not a fix"},
+    };
+    for (size_t i = 0; i < sizeof(fixCases)/sizeof(fixCases[0]); i++) {
+        int haveFix = (fixCases[i].sats >= 6) && (fixCases[i].lat != 0.0 || fixCases[i].lon != 0.0);
+        if (haveFix != fixCases[i].expectHaveFix) {
+            printf("FAIL: haveFix(lat=%.1f lon=%.1f sats=%u) = %d, expected %d (%s)\n",
+                   fixCases[i].lat, fixCases[i].lon, fixCases[i].sats, haveFix,
+                   fixCases[i].expectHaveFix, fixCases[i].why);
+            return 1;
+        }
+    }
+    printf("PASS: GPS fix-validity gate (%zu cases, incl. stale-coords-zero-sats regression)\n",
+           sizeof(fixCases)/sizeof(fixCases[0]));
     return 0;
 }

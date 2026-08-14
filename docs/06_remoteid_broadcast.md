@@ -133,7 +133,15 @@ certified transponder. Useful, worth having, not a compliance story.
     flight would be worse than losing it), which isn't free.
 - **No telemetry, no broadcast.** Without a GPS fix there is nothing real to
   report, so instances 0/1 stay off the air rather than broadcast a
-  Basic‑ID‑only "ghost" drone — see §2.
+  Basic‑ID‑only "ghost" drone — see §2. **"Fix" means a real one, not just a
+  nonzero coordinate:** a field‑test finding (2026‑08‑14) caught the
+  broadcast starting while disarmed with no real GPS lock, because the
+  original check was `lat != 0 || lon != 0` alone — Betaflight's
+  `crsfFrameGps()` sends whatever `gpsSol` currently holds every frame
+  regardless of fix status, which can be a stale/cached position from
+  before losing lock. Fixed to also require `sats >= 6` (matches this
+  file's own `HorizAccuracy` "good fix" cutoff; Betaflight's own GPS Rescue
+  arm‑readiness gate defaults considerably higher still, commonly 8).
 
 This is a *different transport*, selected at build time. It is **mutually
 exclusive** with the GCS BLE transport (`devTransport_BLE.cpp`) — both own the
