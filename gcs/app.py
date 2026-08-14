@@ -46,6 +46,15 @@ def _run_backend():
         print(f"[app] backend stopped: {e}", file=sys.stderr)
 
 
+class Api:
+    """Exposed to the WKWebView as `pywebview.api.*` for things a plain
+    browser tab can't do - a native folder picker for the log directory."""
+    def choose_log_dir(self):
+        result = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
+        # pywebview returns a tuple of one path, or None if cancelled.
+        return result[0] if result else None
+
+
 def _wait_for_server(host, port, timeout=15.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -66,6 +75,7 @@ def main():
         "ELRS TLM RX",
         f"http://{HOST}:{PORT}/",
         width=1240, height=820, min_size=(960, 640),
+        js_api=Api(),
     )
     # gui=None lets pywebview pick the Cocoa/WKWebView backend on macOS.
     webview.start()

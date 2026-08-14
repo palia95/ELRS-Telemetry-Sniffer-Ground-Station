@@ -25,6 +25,7 @@ import json
 import os
 import queue
 import re
+import sys
 import threading
 import time
 
@@ -96,23 +97,70 @@ class State:
             return dict(self._d)
 
 
+def _settings_path():
+    """A proper per-user config location, NOT relative to this script's own
+    path - inside a packaged .app that resolves to Contents/Frameworks/,
+    which is fragile (wiped on rebuild/re-signing) and not somewhere a user
+    would think to look for their own recordings."""
+    if sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support/ElrsTlmRx")
+    elif sys.platform == "win32":
+        base = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "ElrsTlmRx")
+    else:
+        base = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "ElrsTlmRx")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "settings.json")
+
+
+def _default_log_dir():
+    return os.path.expanduser("~/Documents/ElrsTlmRx Logs")
+
+
+def _load_settings():
+    try:
+        with open(_settings_path()) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_settings(d):
+    try:
+        with open(_settings_path(), "w") as f:
+            json.dump(d, f)
+    except OSError as e:
+        print(f"[gcs] could not save settings: {e}")
+
+
 class CsvLogger:
     def __init__(self):
         self._f = None
         self._w = None
         self.path = None
+        # Persisted across restarts (see _settings_path) - set once, remembered.
+        self.log_dir = _load_settings().get("log_dir") or _default_log_dir()
 
     @property
     def active(self):
         return self._f is not None
 
+    def set_log_dir(self, path):
+        path = os.path.expanduser((path or "").strip())
+        if not path:
+            return
+        self.log_dir = path
+        settings = _load_settings()
+        settings["log_dir"] = path
+        _save_settings(settings)
+        print(f"[gcs] log folder set to {path}")
+
     def start(self, path=None):
         if self.active:
             return self.path
         if path is None:
-            os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
+            os.makedirs(self.log_dir, exist_ok=True)
             stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(HERE, "logs", f"elrs_tlm_{stamp}.csv")
+            path = os.path.join(self.log_dir, f"elrs_tlm_{stamp}.csv")
         self._f = open(path, "w", newline="")
         self._w = csv.DictWriter(self._f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         self._w.writeheader()
@@ -435,6 +483,7 @@ class Hub:
             "scanning": self.scanning,
             "logging": self.logger.active,
             "log_path": self.logger.path,
+            "log_dir": self.logger.log_dir,
         })
 
     def _telemetry_msg(self, snap):
@@ -502,6 +551,9 @@ async def ws_handler(request):
                     print(f"[gcs] logging -> {hub.logger.start()}")
                 else:
                     hub.logger.stop()
+                await hub.broadcast_sources()
+            elif c == "set_log_dir":
+                hub.logger.set_log_dir(cmd.get("dir", ""))
                 await hub.broadcast_sources()
     finally:
         hub.clients.discard(ws)
