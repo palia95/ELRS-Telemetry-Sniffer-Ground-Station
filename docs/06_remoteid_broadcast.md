@@ -150,14 +150,31 @@ one BLE radio identity; the firmware `#error`s if both are enabled.
 | **2** | 1M | Legacy, **connectable** | A tiny Nordic‑UART‑Service GATT server for Operator ID / EU class entry. Up only during the boot **config window** (§8.2), not "until airborne" — see below. |
 
 Instances 0/1 only broadcast while a GPS fix exists (or is fresh — stale
-`>5s` = treated as lost). **No fix means the module goes quiet** rather than
-broadcasting a Basic‑ID‑only "ghost" drone with an undeclared position — that
-isn't useful Remote ID. Broadcasting resumes automatically the moment a fix
-(re)appears. This wait state is scoped so it can never delay the config
-window or touch the debug serial link: it only runs once `RemoteID_Tick` has
-already left the config phase, and it only ever calls `stop()`/`start()` on
-instances 0/1 (see the `devTransport_RemoteID.cpp` comment marked
-`INVARIANT` for the enforcement).
+`>REMOTEID_FIX_STALE_MS` = treated as lost, **12 s by default**). **No fix
+means the module goes quiet** rather than broadcasting a Basic‑ID‑only
+"ghost" drone with an undeclared position — that isn't useful Remote ID.
+Broadcasting resumes automatically the moment a fix (re)appears. This wait
+state is scoped so it can never delay the config window or touch the debug
+serial link: it only runs once `RemoteID_Tick` has already left the config
+phase, and it only ever calls `stop()`/`start()` on instances 0/1 (see the
+`devTransport_RemoteID.cpp` comment marked `INVARIANT` for the enforcement).
+
+> **This threshold matters more than it looks — tune it to your Telem
+> Ratio.** GPS is one of several sensor types sharing ELRS's rate‑limited
+> uplink telemetry pipe (see `TLMBurstMaxForRateRatio()` in
+> `common.cpp`), so its real update interval can be several seconds even at
+> a moderate Telem Ratio — not the ~1Hz an idealized "GPS is fast" assumption
+> would suggest. Field‑measured (2026‑08‑14, 150Hz / 1:64 Telem Ratio):
+> genuine GPS updates every **~4.6–4.9s**. The threshold used to be a
+> hardcoded `5000ms`, sitting right on top of that real cadence — normal
+> jitter (one delayed/dropped telemetry chunk) was enough to push an
+> interval over it, flapping the broadcast off. A receiver that treats
+> identity/operator fields as "learned once, sticky" but treats *live
+> aircraft position* as something that must be fresh will show exactly that
+> as a symptom: pilot/operator info populates, aircraft position doesn't (or
+> flickers). If your Telem Ratio is more conservative than 1:64, raise
+> `REMOTEID_FIX_STALE_MS` further — it should be a solid multiple of your
+> actual observed GPS cadence, not just barely above it.
 
 Why both 0 and 1: Legacy is what nearly every scanner (all iOS, older Android)
 can receive; Coded PHY adds range for the subset of Android phones that support
