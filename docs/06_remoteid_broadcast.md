@@ -626,6 +626,26 @@ from that same message — display correctly).
 Verified **not our bug**: a real over‑the‑air capture (nRF Connect raw hex)
 was decoded byte‑for‑byte against the actual `opendroneid-core-c` decoder —
 `ClassificationType=1` (EU), `CategoryEU=1` (Open), `ClassEU=1` (C0), exactly
-as expected. The classification bytes are correctly on the air; this is a
-DroneTag‑side rendering/decode gap, not something fixable from the firmware
-side. No firmware change made for this.
+as expected. The classification bytes are correctly on the air; **the
+OpenDroneID Android reference app confirms it, showing the same C0/EU
+classification correctly.** This is a DroneTag‑side gap, not something
+fixable from the firmware side. No firmware change made for this.
+
+**Likely explanation, from DroneTag's own API docs
+(`https://api-docs.dronetag.com/`):** their `uas_class` (C0‑C6) field only
+exists in the **Aircrafts** section — a per‑aircraft profile a user manually
+registers in a DroneTag account (`model {id, name}`, `uas_class`, etc.). It
+does not appear anywhere in their live telemetry schemas
+(`/v2/airspace/telemetry/ua` or `/system` — position/velocity/state only,
+nothing about classification, manufacturer, model, or ID type). This strongly
+suggests DroneTag's app populates "Class"/"Manufacturer"/"Model"/"Category"
+from a **registered‑aircraft lookup** (matched by Basic ID/serial), not by
+decoding the live ASTM System message's classification bytes off the air.
+Our Basic ID is a synthesized session ID (`ELRS-<hex UID>`), not a real
+CTA‑2063‑A registrable serial, and no one can register this aircraft in a
+DroneTag account — so there's no profile for DroneTag to pull `Class` from,
+regardless of what's actually broadcast. Consistent with everything
+observed: correct bytes, correct on a pure protocol decoder (OpenDroneID),
+blank on a registration‑database‑backed app (DroneTag). Fixing this for real
+would need a genuine CAA‑style registration DroneTag recognizes — out of
+scope for a self‑built aircraft's sniffer‑based broadcast.
