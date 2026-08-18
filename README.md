@@ -12,6 +12,17 @@ Status: firmware, BLE bridge, OLED status display, and the GCS (macOS native
 app + cross-platform Python) are built and validated on real hardware. The
 Android app is a drafted skeleton, not yet functional. See **Roadmap** below.
 
+## Gallery
+
+<!--
+  Images live in Img/ (repo root of telemetry-sniffer/), not yet added.
+  Once a file lands there, drop it in below, e.g.:
+    ![Sniffer board on the bench](Img/board_bench.jpg)
+    ![GCS dashboard, live flight](Img/gcs_dashboard.jpg)
+-->
+
+*Photos coming soon — bare board, case/mount, and the GCS dashboard in use.*
+
 ## Credits — this project builds directly on:
 
 - **[ExpressLRS](https://github.com/ExpressLRS/ExpressLRS)** (GPL-3.0). The
@@ -239,6 +250,7 @@ Check local regulations before using this on anything else.
 telemetry-sniffer/
 ├─ README.md                 ← you are here
 ├─ LICENSE                    ← GPL-3.0 (inherited from ExpressLRS)
+├─ Img/                       ← photos referenced from the Gallery section above
 ├─ docs/                      ← protocol reference, build/bringup guides
 ├─ firmware/                  ← patch + new sources layered on ExpressLRS 3.5.6
 ├─ gcs/                       ← Python ground station (macOS native + browser)
