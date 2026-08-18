@@ -193,9 +193,13 @@ can't claim the manufacturer-declared C1–C6 classes, so those aren't offered;
 default `C0`) are set once and stored in NVS, over BLE (write to
 characteristic `6E400002`) or over USB serial / the GCS (`O:<id>`, `C:0`/`C:1`).
 Full writeup, build/flash steps, Operator-ID format, and compliance status:
-[`docs/06_remoteid_broadcast.md`](docs/06_remoteid_broadcast.md). Bench-verified
-only so far — [`docs/07_remoteid_field_test_checklist.md`](docs/07_remoteid_field_test_checklist.md)
-is the checklist for the first real-drone test.
+[`docs/06_remoteid_broadcast.md`](docs/06_remoteid_broadcast.md). **Field-tested
+on a real flight** (2026‑08‑14/15) — position, altitude, arm state, and
+Operator ID all confirmed live in DroneTag and the OpenDroneID reference app;
+see [`docs/06_remoteid_broadcast.md`](docs/06_remoteid_broadcast.md#13-field-test-finding-dronetag-showed-identity-but-not-live-position)
+§13 for the field-test writeup and
+[`docs/07_remoteid_field_test_checklist.md`](docs/07_remoteid_field_test_checklist.md)
+for the checklist it followed.
 
 ## Running the ground station (GCS)
 

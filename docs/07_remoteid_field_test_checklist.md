@@ -1,10 +1,15 @@
 # 07 — Field test checklist (real drone, real link)
 
-Everything so far (docs/06) has been verified two ways only: synthetic host
-unit tests (`firmware/test/test_remoteid.c`) and a bench board with **no real
-ELRS link, no real GPS, no real flight controller telemetry**. This checklist
-is for the first time real GPS/VARIO/BARO/FLIGHT_MODE telemetry flows through
-this code end‑to‑end. Expect to find things — that's the point of testing.
+**Status: completed (2026‑08‑14/15, multiple real flights).** Kept as
+reference for what was checked and how — see
+[`06_remoteid_broadcast.md`](06_remoteid_broadcast.md) §12–13 for the actual
+findings and fixes that came out of running it. Useful again after any
+future change to the RemoteID data path.
+
+This checklist covers the first time real GPS/VARIO/BARO/FLIGHT_MODE
+telemetry flowed through this code end‑to‑end, beyond the synthetic host
+unit tests (`firmware/test/test_remoteid.c`) and no‑link bench sanity checks.
+Expect to find things — that's the point of testing.
 
 Work top to bottom; each phase assumes the previous one passed. Note the
 exact serial log lines next to each item — that's what to grep for while

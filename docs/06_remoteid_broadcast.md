@@ -564,11 +564,15 @@ board revision; if truly non‑PA, drop those two keys from the layout JSON.
 
 ---
 
-## 12. Next: real-drone field testing
+## 12. Real‑drone field testing — done, real flights
 
-Everything above is bench‑verified only (synthetic test cases, no real
-GPS/link). [`07_remoteid_field_test_checklist.md`](07_remoteid_field_test_checklist.md)
-is the phased checklist for the first real end‑to‑end test.
+[`07_remoteid_field_test_checklist.md`](07_remoteid_field_test_checklist.md)
+was the phased checklist used for this. **Completed on real flights**
+(2026‑08‑14/15, multiple sessions): position, altitude, arm/disarm state
+transitions, Operator ID, and EU classification all confirmed live over the
+air, cross‑checked against both DroneTag and the OpenDroneID Android
+reference app, and independently verified against the sniffer's own raw
+CRSF log. See §13 below for the findings (and fixes) that came out of it.
 
 ---
 
