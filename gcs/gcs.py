@@ -26,15 +26,24 @@ import os
 import queue
 import re
 import sys
+import ssl
+import tempfile
 import threading
 import time
+from urllib.parse import urlsplit
 
+import aiohttp
 from aiohttp import web
 
 import crsf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
+PROJECT_URL = "https://github.com/palia95/ELRS-Telemetry-Sniffer-Ground-Station"
+TILE_USER_AGENT = f"ElrsTlmRx/1.0 (+{PROJECT_URL})"
+TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+TILE_MAX_AGE = 7 * 24 * 3600     # refresh cached tiles older than this
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"     # notify (device -> us)
 NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"     # write  (us -> device), e.g. "P:<phrase>"
@@ -99,8 +108,8 @@ class State:
             return dict(self._d)
 
 
-def _settings_path():
-    """A proper per-user config location, NOT relative to this script's own
+def _app_dir():
+    """A proper per-user data location, NOT relative to this script's own
     path - inside a packaged .app that resolves to Contents/Frameworks/,
     which is fragile (wiped on rebuild/re-signing) and not somewhere a user
     would think to look for their own recordings."""
@@ -111,7 +120,15 @@ def _settings_path():
     else:
         base = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "ElrsTlmRx")
     os.makedirs(base, exist_ok=True)
-    return os.path.join(base, "settings.json")
+    return base
+
+
+def _settings_path():
+    return os.path.join(_app_dir(), "settings.json")
+
+
+def _tile_dir():
+    return os.path.join(_app_dir(), "tiles")
 
 
 def _default_log_dir():
@@ -170,8 +187,11 @@ class CsvLogger:
         return path
 
     def stop(self):
-        if self._f:
-            self._f.close()
+        try:
+            if self._f:
+                self._f.close()
+        except OSError:
+            pass
         self._f = self._w = None
 
     def write(self, snap):
@@ -211,11 +231,11 @@ class TransportManager:
         payload = ("P:" + phrase + "\n").encode()
         if self.kind == "serial":
             self._tx.put(payload)
-            print(f"[gcs] queued phrase over serial: {phrase!r}")
+            print("[gcs] queued phrase over serial")
         elif self.kind == "ble" and self._ble_client is not None:
             try:
                 await self._ble_client.write_gatt_char(NUS_RX, payload, response=False)
-                print(f"[gcs] sent phrase over BLE: {phrase!r}")
+                print("[gcs] sent phrase over BLE")
             except Exception as e:
                 print(f"[gcs] BLE phrase write failed: {e}")
 
@@ -464,6 +484,7 @@ async def ble_reader(hub, target, stop, mgr):
 
 async def scan_ble(hub):
     hub.scanning = True
+    hub.scan_error = None
     await hub.broadcast_sources()
     devices = []
     try:
@@ -496,6 +517,7 @@ class Hub:
         self.ble_devices = []
         self.scanning = False
         self.scan_error = None
+        self.log_error = None
 
     def submit(self, frame):
         self.loop.call_soon_threadsafe(self.queue.put_nowait, frame)
@@ -523,16 +545,39 @@ class Hub:
     async def process_loop(self):
         while True:
             frame = await self.queue.get()
-            r = crsf.parse_frame(frame)
-            if not r:
-                continue
-            t, fields = r
-            is_tlm = (t != crsf.LINK_STATISTICS)
-            self.state.apply(fields, telemetry=is_tlm)
-            snap = self.state.snapshot()
-            if is_tlm and self.logger.active:
-                self.logger.write(snap)
-            await self.broadcast_telemetry(snap)
+            try:
+                r = crsf.parse_frame(frame)
+                if not r:
+                    continue
+                t, fields = r
+                is_tlm = (t != crsf.LINK_STATISTICS)
+                self.state.apply(fields, telemetry=is_tlm)
+                snap = self.state.snapshot()
+                if is_tlm and self.logger.active:
+                    try:
+                        self.logger.write(snap)
+                    except OSError as e:     # disk full, folder removed, ...
+                        self.logger.stop()
+                        self.log_error = f"Recording stopped: {e}"
+                        print(f"[gcs] {self.log_error}")
+                        await self.broadcast_sources()
+                await self.broadcast_telemetry(snap)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[gcs] frame processing error: {e!r}")
+
+    def start_logging(self):
+        """Start CSV logging; on failure record log_error instead of raising."""
+        try:
+            path = self.logger.start()
+        except OSError as e:
+            self.log_error = f"Could not start recording: {e}"
+            print(f"[gcs] {self.log_error}")
+            return None
+        self.log_error = None
+        print(f"[gcs] logging -> {path}")
+        return path
 
     def _sources_msg(self):
         return json.dumps({
@@ -541,6 +586,8 @@ class Hub:
             "serial_ports": list_serial_ports(),
             "ble_devices": self.ble_devices,
             "scanning": self.scanning,
+            "scan_error": self.scan_error,
+            "log_error": self.log_error,
             "logging": self.logger.active,
             "log_path": self.logger.path,
             "log_dir": self.logger.log_dir,
@@ -570,8 +617,43 @@ class Hub:
 
 
 # --------------------------------------------------------------------------
+def _host_parts(netloc):
+    """Split 'host:port' / '[::1]:port' into (hostname, port-or-None)."""
+    try:
+        u = urlsplit("//" + netloc)
+        return (u.hostname or "").lower(), u.port
+    except ValueError:
+        return "", None
+
+
+def origin_allowed(request):
+    """Reject cross-site WebSockets and DNS rebinding.
+    Host must be loopback when bound to loopback (any Host if bound to a
+    non-loopback address); an Origin, when present, must match Host."""
+    host_hdr = request.headers.get("Host", "")
+    hostname, _ = _host_parts(host_hdr)
+    bind = (request.app.get("host") or "127.0.0.1").lower()
+    if bind in LOOPBACK_HOSTS and hostname not in LOOPBACK_HOSTS:
+        return False
+    # bound to a non-loopback address (LAN use): any Host is accepted
+    origin = request.headers.get("Origin")
+    if origin is not None:
+        try:
+            o = urlsplit(origin)
+            o_host, o_port = (o.hostname or "").lower(), o.port
+        except ValueError:
+            return False
+        h_host, h_port = _host_parts(host_hdr)
+        default = {"http": 80, "https": 443}.get(o.scheme)
+        if o_host != h_host or (o_port or default) != (h_port or default):
+            return False
+    return True
+
+
 async def ws_handler(request):
     hub: Hub = request.app["hub"]
+    if not origin_allowed(request):
+        raise web.HTTPForbidden(text="forbidden origin/host")
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
     hub.clients.add(ws)
@@ -584,6 +666,8 @@ async def ws_handler(request):
             try:
                 cmd = json.loads(msg.data)
             except ValueError:
+                continue
+            if not isinstance(cmd, dict):
                 continue
             c = cmd.get("cmd")
             if c == "scan_ble":
@@ -618,9 +702,10 @@ async def ws_handler(request):
                 await hub.mgr.request_coded_enabled()
             elif c == "log":
                 if cmd.get("on"):
-                    print(f"[gcs] logging -> {hub.logger.start()}")
+                    hub.start_logging()
                 else:
                     hub.logger.stop()
+                    hub.log_error = None
                 await hub.broadcast_sources()
             elif c == "set_log_dir":
                 hub.logger.set_log_dir(cmd.get("dir", ""))
@@ -634,11 +719,94 @@ async def index_handler(request):
     return web.FileResponse(os.path.join(STATIC, "index.html"))
 
 
-def build_app(hub):
+def _tls_context():
+    """certifi CA bundle when available - a PyInstaller bundle may have no
+    system CA path. Falls back to the default context."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+async def _tile_session_start(app):
+    # One shared session; OSM tile policy asks for at most 2 connections.
+    app["tile_session"] = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=4),
+        headers={"User-Agent": TILE_USER_AGENT},
+        connector=aiohttp.TCPConnector(limit=2, ssl=_tls_context()))
+
+
+async def _tile_session_stop(app):
+    sess = app.get("tile_session")
+    if sess is not None:
+        await sess.close()
+
+
+async def fetch_tile(app, z, x, y):
+    """Download one tile from OSM; returns bytes or None on any failure."""
+    try:
+        async with app["tile_session"].get(TILE_URL.format(z=z, x=x, y=y)) as r:
+            if r.status != 200:
+                return None
+            return await r.read()
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+        return None
+
+
+def write_tile_atomic(path, data):
+    """Write via temp file in the same dir + os.replace, so a crash or
+    concurrent reader never sees a partial PNG."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+async def tile_handler(request):
+    """Map tiles: serve from the disk cache, else fetch from OSM and cache.
+    Works offline for any area viewed before; tiles older than TILE_MAX_AGE
+    are refreshed, falling back to the stale copy if that fails."""
+    z, x, y = (request.match_info[k] for k in ("z", "x", "y"))
+    path = os.path.join(_tile_dir(), z, x, y + ".png")
+    stale = None
+    try:
+        age = time.time() - os.path.getmtime(path)
+        if age < TILE_MAX_AGE:
+            return web.FileResponse(path)
+        stale = path
+    except OSError:
+        pass
+    data = await fetch_tile(request.app, z, x, y)
+    if data is None:
+        if stale:
+            return web.FileResponse(stale)
+        raise web.HTTPNotFound()
+    try:
+        write_tile_atomic(path, data)
+    except OSError as e:
+        print(f"[gcs] tile cache write failed: {e}")
+    return web.Response(body=data, content_type="image/png")
+
+
+def build_app(hub, host="127.0.0.1"):
     app = web.Application()
     app["hub"] = hub
+    app["host"] = host
+    app.on_startup.append(_tile_session_start)
+    app.on_cleanup.append(_tile_session_stop)
     app.router.add_get("/", index_handler)
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get(r"/tiles/{z:[0-9]+}/{x:[0-9]+}/{y:[0-9]+}.png", tile_handler)
     app.router.add_static("/static/", STATIC)
     return app
 
@@ -651,7 +819,7 @@ async def main_async(args):
 
     asyncio.create_task(hub.process_loop())
 
-    app = build_app(hub)
+    app = build_app(hub, args.host)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, args.host, args.http_port)

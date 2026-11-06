@@ -84,7 +84,8 @@ class MainActivity : ComponentActivity() {
         val cb = object : android.bluetooth.le.ScanCallback() {
             override fun onScanResult(t: Int, r: android.bluetooth.le.ScanResult) {
                 val dev: BluetoothDevice = r.device
-                if (dev.name == BleClient.DEVICE_NAME) {
+                val name = r.scanRecord?.deviceName ?: dev.name
+                if (name == BleClient.DEVICE_NAME) {
                     scanner.stopScan(this)
                     ble?.connect(dev)
                 }

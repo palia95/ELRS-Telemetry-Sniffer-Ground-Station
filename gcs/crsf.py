@@ -128,11 +128,22 @@ class FrameStreamer:
     """Accumulate raw bytes (e.g. from BLE) and yield complete CRSF frames.
 
     Each BLE notification from the sniffer is already one frame, but this makes
-    the path robust to fragmentation / concatenation.
+    the path robust to fragmentation / concatenation. A candidate frame is only
+    accepted once complete AND its CRC matches, so a plausible-but-bogus length
+    byte can't swallow the good frames that follow it.
     """
     def __init__(self, max_len=64):
         self.buf = bytearray()
         self.max_len = max_len
+
+    def _valid_frame_after_start(self):
+        for i in range(1, len(self.buf) - 3):
+            length = self.buf[i + 1]
+            end = i + 2 + length
+            if 2 <= length <= self.max_len and end <= len(self.buf) \
+                    and crc8_dvb_s2(bytes(self.buf[i + 2:end - 1])) == self.buf[end - 1]:
+                return True
+        return False
 
     def feed(self, data: bytes):
         self.buf.extend(data)
@@ -145,7 +156,16 @@ class FrameStreamer:
                 self.buf.pop(0)
                 continue
             if len(self.buf) < total:
+                # Incomplete. If a complete CRC-valid frame already sits later in
+                # the buffer this was a bogus length: resync instead of waiting.
+                if self._valid_frame_after_start():
+                    self.buf.pop(0)
+                    continue
                 break
+            if crc8_dvb_s2(bytes(self.buf[2:total - 1])) != self.buf[total - 1]:
+                # complete but corrupt (or a false start): drop one byte, resync
+                self.buf.pop(0)
+                continue
             frames.append(bytes(self.buf[:total]))
             del self.buf[:total]
         return frames

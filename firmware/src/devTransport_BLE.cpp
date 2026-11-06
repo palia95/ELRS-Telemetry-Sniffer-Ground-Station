@@ -37,8 +37,14 @@ static NimBLECharacteristic *s_txChar = nullptr;
 static volatile bool s_connected = false;
 static void BLE_sink(const uint8_t *frame, uint8_t len);   // fwd decl
 
+// Phrase change deferred from the NimBLE host task to the loop task: applying it
+// rewrites the FHSS hop table the radio ISR is reading. The callback only fills
+// this buffer and sets the flag; BLE_Transport_Poll() applies it.
+static char s_pendingPhrase[96] = {0};
+static volatile bool s_pendingPhraseSet = false;
+
 // ---- Commands from the phone (simple line/binary protocol) ----
-//   "P:<phrase>\n"  -> set binding phrase (recompute UID live)
+//   "P:<phrase>\n"  -> set binding phrase (recompute UID live, applied in the loop task)
 //   Binary 0xEC 0xAC 0x32 0x62 -> enter bind mode (Ghost RX style), etc.
 class RxCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *c) override {
@@ -48,7 +54,14 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
             // strip trailing newline
             while (!phrase.empty() && (phrase.back() == '\n' || phrase.back() == '\r'))
                 phrase.pop_back();
-            Sniffer_SetUidFromPhrase(phrase.c_str());
+            if (s_pendingPhraseSet) {
+                DBGLN("[TLM RX] phrase change already pending, ignoring");
+            } else if (phrase.length() >= sizeof(s_pendingPhrase)) {
+                DBGLN("[TLM RX] phrase too long, ignoring");   // never truncate: would bind the wrong UID
+            } else {
+                memcpy(s_pendingPhrase, phrase.c_str(), phrase.length() + 1);   // fill buffer BEFORE flag
+                s_pendingPhraseSet = true;
+            }
         }
         // extend here: BOOT / BIND / WIFI binary backdoor commands
     }
@@ -87,6 +100,16 @@ void BLE_Transport_Init(const char *deviceName)
     DBGLN("[TLM RX] BLE advertising %s (NUS 6E400001-...)", ok ? "STARTED" : "FAILED");
 
     Ghost_Transport_Register(&BLE_sink);   // receive CRSF frames from Sniffer_Poll
+}
+
+// Loop task: apply a phrase change the write callback queued.
+void BLE_Transport_Poll(void)
+{
+    if (!s_pendingPhraseSet) return;
+    char phrase[sizeof(s_pendingPhrase)];
+    memcpy(phrase, s_pendingPhrase, sizeof(phrase));
+    s_pendingPhraseSet = false;   // callback may queue the next one from here on
+    Sniffer_SetUidFromPhrase(phrase);
 }
 
 // ---- Sink: called (from loop context) for every completed CRSF frame ----

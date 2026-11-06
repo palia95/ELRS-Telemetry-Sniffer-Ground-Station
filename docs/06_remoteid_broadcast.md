@@ -153,8 +153,8 @@ one BLE radio identity; the firmware `#error`s if both are enabled.
 
 | Inst | PHY | Type | Contents |
 |---|---|---|---|
-| **0** | 1M | Legacy (BT4) | One ODID message/second, biased to Location; rotates Basic ID / System in every 3rd slot. 31‑byte cap = one 25‑byte message. |
-| **1** | **LE Coded (S=8)** | BT5 Extended Adv (Long Range) | The full ODID **message pack** (Basic ID + Location + System [+ Operator ID]) in one advert. |
+| **0** | 1M | Legacy (BT4) | One ODID message every **333 ms**, cycling Location, Basic ID, Location, System, Location, Operator ID (6‑slot cycle: Location ≈1.5 Hz, each static message every 2 s). 31‑byte cap = one 25‑byte message. |
+| **1** | **LE Coded (S=8)** | BT5 Extended Adv (Long Range) | The full ODID **message pack** (Basic ID + Location + System [+ Operator ID]) in one advert, refreshed at 1 Hz. |
 | **2** | 1M | Legacy, **connectable** | A tiny Nordic‑UART‑Service GATT server for Operator ID / EU class entry. Up only during the boot **config window** (§8.2), not "until airborne" — see below. |
 
 Instances 0/1 only broadcast while a GPS fix exists (or is fresh — stale
@@ -381,7 +381,8 @@ SWE abcdefghijkl m   ← illustrative placeholder, not a real registration
 
 No display/keypad on the module, so the Operator ID is entered from a phone and
 persisted to NVS. On boot the module opens a **config window** (default 60 s,
-`REMOTEID_CONFIG_WINDOW_MS`) during which **only** the connectable config
+`REMOTEID_CONFIG_WINDOW_MS`; a connected client can hold it open for at most
+180 s total, after which it is disconnected and the window closes) during which **only** the connectable config
 instance advertises — the ODID broadcast is held off so the phone can connect
 without Coded‑PHY / multi‑instance radio contention (running all instances at
 once starves the connection handshake and the connect fails):
@@ -434,7 +435,7 @@ separate BLE advertisement only a Remote ID scanner app decodes.
 > fires when the connectable instance turns into a connection, crashing the
 > instant a phone connects.
 
-### 8.4 EU UA classification: C0 or Legacy only (default C0)
+### 8.4 EU UA classification: C0 or Legacy only (default Legacy)
 
 The System message's EU classification field is configurable — but
 **deliberately limited to two options**, not the full C0–C6 range the ODID
@@ -444,7 +445,7 @@ spec defines:
   the aircraft genuinely meets the C0 criteria (EU 2019/945 Part 1: <250g,
   <19 m/s max speed, etc.) — it's a declared‑conformity claim, not a free
   default for "small drone".
-- **`Legacy`** (default’s sibling option) — `ClassificationType = UNDECLARED`,
+- **`Legacy`** (the default) — `ClassificationType = UNDECLARED`,
   no class marking claimed at all.
 
 **Why not C1–C6:** those are *manufacturer‑declared* classes tied to a CE
@@ -452,8 +453,8 @@ marking on a commercially placed‑on‑market product. A self‑built airframe 
 which is what this sniffer/RemoteID module is designed around — cannot
 legitimately claim them. Offering the full dropdown would let someone
 broadcast a certified class their aircraft doesn't have, which is worse than
-not broadcasting a class at all. **Default is C0**; switch to `Legacy` if
-that doesn't apply to your build.
+not broadcasting a class at all. **Default is Legacy**; switch to `C0` only if
+the aircraft genuinely meets the C0 criteria.
 
 Same three control paths as the Operator ID:
 
@@ -466,7 +467,7 @@ Same three control paths as the Operator ID:
 
 Any other value (`C:2`..`C:6`, garbage) is rejected by the firmware and
 ignored — the stored value never changes. Persisted to NVS like the Operator
-ID, survives reboots, defaults to C0 on first boot / if NVS is empty.
+ID, survives reboots, defaults to Legacy on first boot / if NVS is empty.
 
 ### 8.5 Per‑PHY broadcast enable: Legacy / Coded, independently toggleable
 
@@ -479,7 +480,9 @@ itself depend on which PHYs happen to be enabled at the time.
   set; `L?`/`R?` to read → `[RID] LEGACY=ON|OFF` / `[RID] CODED=ON|OFF`.
 - **GCS:** two checkboxes ("Legacy (BLE4)" / "Coded PHY / Long Range") next to
   the class control, synced on connect and on every change.
-- Persisted to NVS, survives reboots. Disabling an instance that's currently
+- Persisted to NVS, survives reboots. If both PHYs are found disabled in NVS,
+  the firmware logs a warning and re‑enables both at the next boot (a
+  module that broadcasts nothing is never useful). Disabling an instance that's currently
   advertising stops it immediately rather than waiting for the next
   fix‑loss/regain cycle to notice.
 
@@ -502,7 +505,14 @@ Broadcasting valid frames ≠ EASA conformance. Current state:
 
 | Field / message | Status |
 |---|---|
-| Basic ID | ✅ sent — but a **synthesized** `ELRS-<UID>` identifier, **not** a real CAA registration / ANSI‑CTA‑2063 serial (we only overhear the aircraft). |
+| Basic ID | ✅ sent — but a **synthesized** identifier, **not** a real CAA registration / ANSI‑CTA‑2063 serial (we only overhear the aircraft). It is a **random 6‑byte ID generated once and stored in NVS** (`ELRS-<random hex>`), stable across reboots and **not derived from the binding UID**. |
+
+> **WARNING — firmware before this fix broadcast the ELRS UID publicly.** Older
+> builds derived the Basic ID from the binding UID (`ELRS-<hex UID>`), so anyone
+> within scanner range could read it. The UID seeds the OTA CRC and FHSS hop
+> table (see `01_protocol_reference.md` §2), so **anyone who flew an older build
+> should change their binding phrase.**
+
 | Location/Vector (lat/lon/alt/speed/heading) | ✅ sent when a GPS fix exists; withheld (status undeclared) otherwise — and instances 0/1 go off the air entirely with no fix (§2), not just "undeclared". |
 | Location **vertical speed** | ✅ derived — from VARIO/BARO telemetry when present, else from successive GPS altitude samples. |
 | Location **height above take‑off** | ✅ derived — current altitude minus the altitude latched at take‑off. |
@@ -510,9 +520,9 @@ Broadcasting valid frames ≠ EASA conformance. Current state:
 | Location **status** (GROUND/AIRBORNE/EMERGENCY) | ✅ derived, best‑effort, verified against Betaflight's actual source — from CRSF `FLIGHT_MODE` (`!FS!`/`RTH` → EMERGENCY; disarmed+fix → GROUND; armed+fix → AIRBORNE). Not every FC/mode string follows this convention. |
 | System (operator/take‑off position) | ✅ sent once take‑off is latched (at a **clean armed transition**, via `FLIGHT_MODE`, not just first fix, and not re‑latched across an RTH/failsafe excursion — §1). **One‑time snapshot, not live — see §1 for the distance‑from‑pilot caveat.** |
 | System **operator altitude** | ✅ derived — the same latched take‑off altitude. |
-| System **EU classification** | ✅ user‑configurable, **C0 or Legacy only** (§8.4), default C0. Not the full C1–C6 range — see §8.4 for why. |
+| System **EU classification** | ✅ user‑configurable, **C0 or Legacy only** (§8.4), default Legacy. Not the full C1–C6 range — see §8.4 for why. |
 | Operator ID | ✅ sent when set (§8). **Mandatory for EU/EASA**, optional in base ASTM. |
-| Location/System **timestamp** | ✅ set from the **GCS's system clock**, pushed once per serial connect (`T:<unix seconds>`, §1). CRSF GPS itself carries no time field, so this only works while a GCS has connected over USB serial at least once this boot — pure BLE-only sessions (no cable ever attached) still report "unknown", honestly, not faked from `millis()`. |
+| Location/System **timestamp** | ✅ set from the **GCS's system clock**, pushed once per serial connect (`T:<unix seconds>`, §1). `Location.TimeStamp` is the time of the **GPS fix**, not the broadcast time. CRSF GPS itself carries no time field, so this only works while a GCS has connected over USB serial at least once this boot — pure BLE-only sessions (no cable ever attached) still report "unknown", honestly, not faked from `millis()`. |
 | Self‑ID | ❌ not sent (optional in spec). |
 | Physical placement | ⚠️ must be **onboard the aircraft**, not ground‑side with the handset. |
 | C0 classification accuracy | ⚠️ **the module reports whatever class you configure — it does not verify the aircraft actually meets C0's weight/speed criteria.** That check is on you. |
@@ -645,7 +655,7 @@ nothing about classification, manufacturer, model, or ID type). This strongly
 suggests DroneTag's app populates "Class"/"Manufacturer"/"Model"/"Category"
 from a **registered‑aircraft lookup** (matched by Basic ID/serial), not by
 decoding the live ASTM System message's classification bytes off the air.
-Our Basic ID is a synthesized session ID (`ELRS-<hex UID>`), not a real
+Our Basic ID is a synthesized random ID (`ELRS-<random hex>`, generated once and kept in NVS), not a real
 CTA‑2063‑A registrable serial, and no one can register this aircraft in a
 DroneTag account — so there's no profile for DroneTag to pull `Class` from,
 regardless of what's actually broadcast. Consistent with everything

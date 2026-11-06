@@ -3,6 +3,7 @@
 // Targets ExpressLRS 3.5.x, SX1280 2.4GHz, ESP32-S3.
 // =====================================================================
 #include "sniffer.h"
+#include "ghost_logic.h"       // ghostCrc8, GhostSeq_t, ghostFrameLen
 
 #include "common.h"                 // UID[], OtaUpdateCrcInitFromUid, uidMacSeedGet, OtaIsFullRes
 #include "FHSS.h"                   // FHSSrandomiseFHSSsequence
@@ -68,6 +69,11 @@ int Sniffer_TlmSnrDb(void)   { return s_tlmSnrRaw / 4; }   // RADIO_SNR_SCALE = 
 static StubbornReceiver TelemetrySniffer;
 // CRSF frames are small; 72 bytes covers the largest ELRS telemetry frame.
 static uint8_t CRSFinBuffer[72];
+// Mirrors the receiver's package index progression so a frame spliced over a
+// lost packet is detected (see ghost_logic.h). Written from ProcessTLM (ISR),
+// read/reset from Sniffer_Poll only while the receiver holds a finished frame.
+static GhostSeq_t s_seq = {0, 0, 0};
+static volatile uint32_t s_framesDropped = 0;
 static volatile bool s_uidValid = false;
 
 // ---------------------------------------------------------------------
@@ -97,7 +103,7 @@ void Sniffer_SetUidFromPhrase(const char *phrase)
     // md5('-DMY_BINDING_PHRASE="' + phrase + '"')  ->  first 6 bytes = UID
     char buf[160];
     int n = snprintf(buf, sizeof(buf), "-DMY_BINDING_PHRASE=\"%s\"", phrase ? phrase : "");
-    if (n <= 0) return;
+    if (n <= 0 || n >= (int)sizeof(buf)) return;   // snprintf truncated: hashing a cut phrase would silently bind the wrong UID
 
     uint8_t digest[16];
     MD5Builder md5;
@@ -119,6 +125,7 @@ void Sniffer_OnRateChanged(void)
         OtaIsFullRes ? ELRS8_TELEMETRY_MAX_PACKAGES : ELRS4_TELEMETRY_MAX_PACKAGES);
     TelemetrySniffer.SetDataToReceive(CRSFinBuffer, sizeof(CRSFinBuffer));
     TelemetrySniffer.ResetState();
+    ghostSeqReset(&s_seq);
 }
 
 // ---------------------------------------------------------------------
@@ -149,8 +156,11 @@ void Sniffer_ProcessTLM(const OTA_Packet_s *otaPkt)
             telemPtr = ota8->tlm_dl.payload;
             dataLen  = sizeof(ota8->tlm_dl.payload);
         }
-        TelemetrySniffer.ReceiveData(
-            ota8->tlm_dl.packageIndex & ELRS8_TELEMETRY_MAX_PACKAGES, telemPtr, dataLen);
+        const uint8_t idx = ota8->tlm_dl.packageIndex & ELRS8_TELEMETRY_MAX_PACKAGES;
+        // The receiver ignores packets while it holds a finished frame, so must we.
+        if (!TelemetrySniffer.HasFinishedData())
+            ghostSeqFeed(&s_seq, idx, ELRS8_TELEMETRY_MAX_PACKAGES, dataLen);
+        TelemetrySniffer.ReceiveData(idx, telemPtr, dataLen);
     }
     else
     {
@@ -160,11 +170,16 @@ void Sniffer_ProcessTLM(const OTA_Packet_s *otaPkt)
             // link-stats-only packet, no reassembly payload
             break;
         case ELRS_TELEMETRY_TYPE_DATA:
+        {
+            const uint8_t idx = otaPkt->std.tlm_dl.packageIndex & ELRS4_TELEMETRY_MAX_PACKAGES;
+            if (!TelemetrySniffer.HasFinishedData())
+                ghostSeqFeed(&s_seq, idx, ELRS4_TELEMETRY_MAX_PACKAGES, sizeof(otaPkt->std.tlm_dl.payload));
             TelemetrySniffer.ReceiveData(
-                otaPkt->std.tlm_dl.packageIndex & ELRS4_TELEMETRY_MAX_PACKAGES,
+                idx,
                 otaPkt->std.tlm_dl.payload,
                 sizeof(otaPkt->std.tlm_dl.payload));
             break;
+        }
         }
     }
 }
@@ -176,10 +191,19 @@ void Sniffer_Poll(void)
 {
     if (TelemetrySniffer.HasFinishedData())
     {
-        // CRSFinBuffer[0] = dest addr, [1] = length of (type..crc)
-        const uint8_t frameLen = CRSFinBuffer[1] + 2; // + dest + len bytes
-        Ghost_Transport_SendCRSF(CRSFinBuffer, frameLen);
+        // CRSFinBuffer[0] = dest addr, [1] = length of (type..crc).
+        // Snapshot buffer + tracker first: a resync can re-arm the receiver
+        // (and the ISR overwrite the buffer) while we validate.
+        uint8_t frame[sizeof(CRSFinBuffer)];
+        memcpy(frame, CRSFinBuffer, sizeof(frame));
+        const GhostSeq_t seq = s_seq;
+        ghostSeqReset(&s_seq);        // ISR doesn't feed it while the receiver is finished
         TelemetrySniffer.Unlock();
+        // The passive receiver can splice stale bytes over a lost packet, so only
+        // emit a frame that arrived in order, fits the buffer and passes CRC.
+        const uint8_t frameLen = seq.ok ? ghostFrameLen(frame, sizeof(frame), seq.bytes) : 0;
+        if (frameLen) Ghost_Transport_SendCRSF(frame, frameLen);
+        else s_framesDropped++;
     }
 }
 
@@ -202,18 +226,6 @@ void Ghost_Transport_SendCRSF(const uint8_t *frame, uint8_t len)
     for (int i = 0; i < GHOST_MAX_SINKS; i++) {
         if (s_sinks[i]) s_sinks[i](frame, len);
     }
-}
-
-// CRC8 / DVB-S2 (poly 0xD5) over type+payload, matching the CRSF wire CRC.
-static uint8_t ghostCrc8(const uint8_t *p, uint8_t n)
-{
-    uint8_t crc = 0;
-    for (uint8_t i = 0; i < n; i++) {
-        crc ^= p[i];
-        for (uint8_t b = 0; b < 8; b++)
-            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0xD5) : (uint8_t)(crc << 1);
-    }
-    return crc;
 }
 
 // The sniffed link does NOT send a CRSF LINK_STATISTICS frame, so RSSI/LQ never
@@ -328,6 +340,9 @@ void Ghost_Loop(uint32_t nowMs)
 #if defined(GHOST_DISPLAY)
     GhostDisplay_Tick(nowMs);
 #endif
+#if defined(GHOST_TRANSPORT_BLE)
+    BLE_Transport_Poll();
+#endif
 #if defined(GHOST_TRANSPORT_REMOTEID)
     RemoteID_Tick(nowMs);
 #endif
@@ -359,8 +374,8 @@ void Ghost_Loop(uint32_t nowMs)
         const char *st = connectionState == connected    ? "LOCK" :
                          connectionState == tentative     ? "TENT" :
                          connectionState == disconnected  ? "SRCH" : "----";
-        DBGLN("[TLM RX] %s rate=%uHz raw=%u tlmPkts=%u | DRONE rssi=%d lq=%u snr=%d | tx rssi=-%u lq=%u",
-              st, hz, (unsigned)s_rawPkts, (unsigned)s_tlmPkts,
+        DBGLN("[TLM RX] %s rate=%uHz raw=%u tlmPkts=%u drop=%u | DRONE rssi=%d lq=%u snr=%d | tx rssi=-%u lq=%u",
+              st, hz, (unsigned)s_rawPkts, (unsigned)s_tlmPkts, (unsigned)s_framesDropped,
               Sniffer_TlmRssiDbm(), (unsigned)s_tlmLq, Sniffer_TlmSnrDb(),
               CRSF::LinkStatistics.uplink_RSSI_1,
               CRSF::LinkStatistics.uplink_Link_quality);

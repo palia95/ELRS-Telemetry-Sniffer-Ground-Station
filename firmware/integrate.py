@@ -16,7 +16,7 @@ import os, shutil, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_FILES = [
-    "sniffer.h", "sniffer.cpp",
+    "sniffer.h", "sniffer.cpp", "ghost_logic.h",
     "devTransport_Serial.cpp",
     "devTransport_BLE.cpp", "devTransport_WiFiUDP.cpp",
     "devTransport_RemoteID.cpp",

@@ -85,6 +85,10 @@ void Ghost_SetupTransports(void);
 // Transport init entry points (each defined only when its macro is set).
 void GhostSerial_Init(void);
 void BLE_Transport_Init(const char *deviceName);
+// Applies work the BLE host-task callbacks deferred (e.g. "P:" phrase change), so
+// the hop table is never rewritten from the NimBLE task while the radio ISR
+// reads it. Called every loop from Ghost_Loop under GHOST_TRANSPORT_BLE.
+void BLE_Transport_Poll(void);
 void WiFiUDP_Transport_Init(void);
 void GhostDisplay_Init(void);
 void GhostDisplay_Tick(uint32_t nowMs);
@@ -105,7 +109,7 @@ void RemoteID_ReportOperatorId(void);
 
 // Set the EU UA class - only 0 (Legacy/no class marking) or 1 (C0) are
 // accepted (self-built aircraft can't legitimately claim C1..C6, which are
-// manufacturer-declared classes). Default C0. Persists to NVS, mirrors the
+// manufacturer-declared classes). Default Legacy. Persists to NVS, mirrors the
 // BLE "C:<0|1>" write. Safe to call from the loop task.
 void RemoteID_SetClass(uint8_t classNum);
 // Print the current EU class as a machine-parseable line ("[RID] CLASS=C0" or "LEGACY").

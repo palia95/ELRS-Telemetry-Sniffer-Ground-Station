@@ -69,18 +69,33 @@ class CrsfParser(private val onFrame: (Telemetry) -> Unit) {
             if (buf.size < total) return
 
             val frame = IntArray(total) { buf.elementAt(it) }
-            repeat(total) { buf.removeFirst() }
 
-            if (crc8(frame, 2, len - 1) == frame[total - 1]) {
-                decode(frame)
+            if (crc8(frame, 2, len - 1) != frame[total - 1]) {
+                // Bad CRC: the length byte may be corrupt. Drop ONE byte and
+                // resync so a bad length can't swallow following good frames.
+                buf.removeFirst()
+                continue
             }
-            // bad CRC -> drop frame, continue
+            repeat(total) { buf.removeFirst() }
+            decode(frame)
         }
+    }
+
+    /** Minimum payload length (bytes between type and crc) per frame type; matches gcs/crsf.py. */
+    private fun minPayload(type: Int): Int = when (type) {
+        CrsfTypes.GPS -> 15
+        CrsfTypes.BATTERY -> 8
+        CrsfTypes.ATTITUDE -> 6
+        CrsfTypes.VARIO -> 2
+        CrsfTypes.BARO_ALT -> 2
+        CrsfTypes.LINK_STATISTICS -> 10
+        else -> 0
     }
 
     private fun decode(f: IntArray) {
         val type = f[2]
         val p = 3 // payload start
+        if (f.size - 4 < minPayload(type)) return // short frame: drop
         when (type) {
             CrsfTypes.GPS -> onFrame(Telemetry.Gps(GpsData(
                 latDeg = i32(f, p) / 1e7,
@@ -102,7 +117,7 @@ class CrsfParser(private val onFrame: (Telemetry) -> Unit) {
                 yawDeg = s16(f, p + 4) / 10000.0 * 57.2958
             )))
             CrsfTypes.VARIO -> onFrame(Telemetry.Vario(s16(f, p) / 100.0))
-            CrsfTypes.BARO_ALT -> onFrame(Telemetry.BaroAlt((u16(f, p) - 10000) / 10.0))
+            CrsfTypes.BARO_ALT -> onFrame(Telemetry.BaroAlt(baroAltM(u16(f, p))))
             CrsfTypes.FLIGHT_MODE -> {
                 val sb = StringBuilder()
                 var i = p
@@ -116,6 +131,10 @@ class CrsfParser(private val onFrame: (Telemetry) -> Unit) {
             else -> onFrame(Telemetry.Unknown(type))
         }
     }
+
+    /** High bit set = whole metres, else decimetres offset by 10000 (as gcs/crsf.py). */
+    private fun baroAltM(v: Int): Double =
+        if (v and 0x8000 != 0) (v and 0x7FFF).toDouble() else (v - 10000) / 10.0
 
     // --- big-endian field readers ---
     private fun u16(f: IntArray, i: Int) = (f[i] shl 8) or f[i + 1]

@@ -14,7 +14,7 @@ TARGET_ARCH = None   # or 'universal2'
 datas, binaries, hiddenimports = [('static', 'static')], [], []
 
 # Pull in everything these packages need (backends, data files, dynamic imports).
-for pkg in ('bleak', 'webview', 'aiohttp', 'serial'):
+for pkg in ('bleak', 'webview', 'aiohttp', 'serial', 'certifi'):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

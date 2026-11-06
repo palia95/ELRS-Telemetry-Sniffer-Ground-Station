@@ -87,8 +87,10 @@ python3 gcs.py --serial /dev/cu.usbmodem2101 --csv myflight.csv   # explicit pat
 
 ## Notes / caveats
 
-- **Map tiles need internet** (OpenStreetMap); the rest of the dashboard
-  works offline.
+- **Map tiles need internet** (OpenStreetMap) the first time; they are cached
+  under the per-user app dir (`.../ElrsTlmRx/tiles`, refreshed after 7 days,
+  stale copy used if offline). The rest of the dashboard works offline.
+- Tests: `pip install pytest && python -m pytest test_gcs.py`.
 - **RSSI/LQ are the sniffer's own receive link quality**, not the
   aircraft's — the aircraft doesn't send a CRSF `LINK_STATISTICS` frame, so
   the firmware injects one at 5 Hz from its own link stats.

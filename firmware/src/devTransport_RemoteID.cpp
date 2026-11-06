@@ -77,7 +77,9 @@
 //     running the Coded-PHY / multi-instance broadcast alongside a connectable
 //     instance starves the CONNECT_IND handshake and connections fail (this is
 //     the bug this phase split fixes). The window closes early once the
-//     Operator ID is written and the phone disconnects.
+//     Operator ID is written and the phone disconnects. A phone that stays
+//     connected cannot hold the broadcast off forever: after
+//     REMOTEID_CONFIG_MAX_MS it is disconnected and the broadcast starts.
 //   BROADCAST phase (after the window): instance 2 is retired, instances 0+1
 //     broadcast the ODID messages. Pure connectionless broadcaster, matching
 //     ../../remote-id/PLAN.md §4's "not active during flight".
@@ -85,12 +87,16 @@
 // Three advertising instances, per ASTM F3411 Annex A4 + one config-only:
 //   Instance 0: Bluetooth 4 Legacy Advertising (1M PHY). 31-byte legacy
 //               payload only fits ONE 25-byte ODID message per update, so
-//               this instance round-robins Basic ID / Location / System,
-//               biased toward Location (the only message ASTM requires at
-//               a minimum 1 Hz).
+//               this instance cycles a fixed 6-slot schedule every
+//               REMOTEID_LEGACY_PERIOD_MS (333 ms): Location, Basic ID,
+//               Location, System, Location, Operator ID. Location (the only
+//               message ASTM requires at a minimum 1 Hz) goes out at 1.5 Hz;
+//               each static message every 2 s. An invalid/unencodable slot
+//               falls back to Location.
 //   Instance 1: Bluetooth 5 Long Range (LE Coded PHY, extended advertising).
 //               Bigger payload budget (251B) fits the whole message pack
-//               (Basic ID + Location + System) in one update.
+//               (Basic ID + Location + System + Operator ID) in one update,
+//               on its own timer at REMOTEID_BROADCAST_PERIOD_MS (1 s).
 //   Instance 2: Legacy, CONNECTABLE. A tiny GATT server (Nordic UART
 //               Service, same UUIDs/command style as devTransport_BLE.cpp's
 //               "P:<phrase>") for Operator ID entry from a phone, since this
@@ -136,7 +142,8 @@
 
 #include "sniffer.h"
 #include "logging.h"
-#include "common.h"   // extern UID[UID_LEN] - the ELRS binding UID
+#include "ghost_logic.h"   // legacy slot schedule, unix-at-ms math
+#include <esp_system.h>      // esp_random()
 
 extern "C" {
 #include "opendroneid.h"
@@ -147,7 +154,10 @@ extern "C" {
 #define REMOTEID_UA_TYPE ODID_UATYPE_HELICOPTER_OR_MULTIROTOR
 #endif
 #ifndef REMOTEID_BROADCAST_PERIOD_MS
-#define REMOTEID_BROADCAST_PERIOD_MS 1000   // ASTM F3411: Location >= 1 Hz while airborne
+#define REMOTEID_BROADCAST_PERIOD_MS 1000   // Coded PHY (instance 1) message pack period
+#endif
+#ifndef REMOTEID_LEGACY_PERIOD_MS
+#define REMOTEID_LEGACY_PERIOD_MS 333       // Legacy (instance 0) slot period: 6 slots = 2 s cycle, Location every 2nd slot (1.5 Hz)
 #endif
 #ifndef REMOTEID_FIX_STALE_MS
 // How long without a new GPS frame before s_haveFix is cleared and the WAIT
@@ -179,6 +189,14 @@ extern "C" {
 // the sniffer has no GPS fix to broadcast this early anyway.
 #define REMOTEID_CONFIG_WINDOW_MS 60000
 #endif
+#ifndef REMOTEID_CONFIG_MAX_MS
+// Hard cap on the config phase. The window above normally can't close while a
+// phone is connected (never cut off an in-flight write), but a client that
+// connects and just sits there would then hold the ODID broadcast off for the
+// whole flight. After this long since boot any connected peer is disconnected
+// and the broadcast starts regardless.
+#define REMOTEID_CONFIG_MAX_MS 180000
+#endif
 
 static const uint16_t ODID_ASTM_UUID16 = 0xFFFA;      // ASTM International
 static const uint8_t  ODID_AD_APP_CODE = 0x0D;         // AD Application Code = Open Drone ID
@@ -189,6 +207,7 @@ static const uint8_t  ODID_AD_APP_CODE = 0x0D;         // AD Application Code = 
 #define NUS_RX_CHAR "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  // phone writes here
 
 static NimBLEExtAdvertising *s_adv = nullptr;
+static NimBLEServer *s_server = nullptr;
 static uint8_t s_msgCounter = 0;
 
 // Two-phase lifecycle:
@@ -218,6 +237,13 @@ static Preferences s_prefs;
 static char s_operatorId[ODID_ID_SIZE + 1] = {0};
 static bool s_haveOperatorId = false;
 
+// Basic ID serial: 6 random bytes from esp_random(), generated once and kept in
+// NVS ("ridId"). Deliberately NOT derived from the ELRS UID in any way - the
+// Basic ID is broadcast in clear to anyone, and any function of the 48-bit
+// binding UID (even a truncated hash) can be brute forced back to it, which
+// would hand out the link's binding.
+static uint8_t s_ridId[6] = {0};
+
 // EU UA classification (System message), user-configurable, persisted to NVS.
 // Deliberately only two options, not the full C0..C6 range: this firmware
 // targets self-built aircraft, which are not CE-class-marked products - only
@@ -233,7 +259,7 @@ static bool s_haveOperatorId = false;
 #define REMOTEID_CLASS_LEGACY 0
 #define REMOTEID_CLASS_C0     1
 #ifndef REMOTEID_DEFAULT_CLASS
-#define REMOTEID_DEFAULT_CLASS REMOTEID_CLASS_C0
+#define REMOTEID_DEFAULT_CLASS REMOTEID_CLASS_LEGACY
 #endif
 static uint8_t s_classNum = REMOTEID_DEFAULT_CLASS;
 
@@ -268,7 +294,7 @@ static uint32_t s_timeBaseMs   = 0;   // millis() at that same moment
 
 static uint32_t nowUnix(void)
 {
-    return s_haveTime ? s_timeBaseUnix + (millis() - s_timeBaseMs) / 1000 : 0;
+    return s_haveTime ? ghostUnixAtMs(s_timeBaseUnix, s_timeBaseMs, millis()) : 0;
 }
 
 // ---- Location state, fed by CRSF telemetry frames sniffed off-air ----
@@ -540,12 +566,13 @@ static void fillUasData(ODID_UAS_Data *uas)
     odid_initUasData(uas);
 
     // Basic ID: no real registered serial number on this data path (we only
-    // overhear the aircraft, we don't own it) - synthesize an identifier
-    // from the ELRS binding UID so the same aircraft is at least consistently
-    // identifiable. NOT a substitute for a real CAA-issued ID in production.
+    // overhear the aircraft, we don't own it) - use the random per-module ID
+    // generated once at first boot (s_ridId, persisted in NVS) so the same
+    // aircraft is at least consistently identifiable. Unrelated to the ELRS
+    // binding UID on purpose. NOT a substitute for a real CAA-issued ID.
     char uasId[ODID_ID_SIZE + 1];
     snprintf(uasId, sizeof(uasId), "ELRS-%02X%02X%02X%02X%02X%02X",
-             UID[0], UID[1], UID[2], UID[3], UID[4], UID[5]);
+             s_ridId[0], s_ridId[1], s_ridId[2], s_ridId[3], s_ridId[4], s_ridId[5]);
     uas->BasicID[0].UAType = REMOTEID_UA_TYPE;
     uas->BasicID[0].IDType = ODID_IDTYPE_SPECIFIC_SESSION_ID; // synthesized, not a CAA registration
     strncpy(uas->BasicID[0].UASID, uasId, ODID_ID_SIZE);
@@ -583,7 +610,10 @@ static void fillUasData(ODID_UAS_Data *uas)
     uas->Location.BaroAccuracy    = ODID_VER_ACC_UNKNOWN;
     uas->Location.SpeedAccuracy   = ODID_SPEED_ACC_UNKNOWN;
     uas->Location.TSAccuracy      = ODID_TIME_ACC_UNKNOWN;   // synced once per serial connect, not a live GNSS PPS - don't overclaim precision
-    uas->Location.TimeStamp       = s_haveTime ? (float)(nowUnix() % 3600) : INV_TIMESTAMP;  // seconds after the full hour (spec units), UNKNOWN until a GCS has synced us over serial - see RemoteID_SetTime()
+    // Time of the FIX (the position can be up to REMOTEID_FIX_STALE_MS old), not
+    // of this broadcast: seconds after the full hour (spec units), UNKNOWN until
+    // a GCS has synced us over serial - see RemoteID_SetTime().
+    uas->Location.TimeStamp       = s_haveTime ? (float)(ghostUnixAtMs(s_timeBaseUnix, s_timeBaseMs, s_lastFixMs) % 3600) : INV_TIMESTAMP;
     uas->LocationValid            = s_haveFix ? 1 : 0;
 
     // Operator/take-off location: a STATIC SNAPSHOT latched once at the clean
@@ -600,7 +630,7 @@ static void fillUasData(ODID_UAS_Data *uas)
     uas->System.AreaRadius           = 0;
     uas->System.AreaCeiling          = -1000;
     uas->System.AreaFloor            = -1000;
-    // EU classification (user-configured, default C0; see REMOTEID_CLASS_*
+    // EU classification (user-configured, default Legacy; see REMOTEID_CLASS_*
     // above for why only C0/Legacy are offered). Legacy = no class claimed.
     if (s_classNum == REMOTEID_CLASS_C0) {
         uas->System.ClassificationType = ODID_CLASSIFICATION_TYPE_EU;
@@ -630,12 +660,19 @@ static void fillUasData(ODID_UAS_Data *uas)
 // ponytail: stop/set/start each tick rather than relying on a live
 // in-place data update - simplest thing that is definitely correct with
 // this NimBLE-Arduino version; costs a sub-second gap in the advertising
-// train once a second. Revisit only if bench testing shows a scanner
+// train once per slot (333 ms Legacy / 1 s Coded). Revisit only if bench testing shows a scanner
 // missing broadcasts because of it. ----
 static void setServiceDataInstance(uint8_t instance, const uint8_t *appPayload, size_t appLen, bool legacy, uint8_t phy)
 {
     NimBLEExtAdvertisement adv(phy, phy);
     adv.setLegacyAdvertising(legacy);
+    // Explicit advertising interval (0.625 ms units; the default of 0 leaves it
+    // to the controller): several adverts per payload update so a scanner's
+    // duty cycle still catches each one. Legacy 100 ms (the BT4 minimum for a
+    // non-connectable advert), Coded 250 ms (each advert is ~8x longer on air).
+    const uint32_t itvl = (phy == BLE_HCI_LE_PHY_CODED) ? 400 : 160;
+    adv.setMinInterval(itvl);
+    adv.setMaxInterval(itvl);
     adv.setConnectable(false);
     adv.setScannable(false);
     adv.setServiceData(NimBLEUUID(ODID_ASTM_UUID16), std::string((const char *)appPayload, appLen));
@@ -793,6 +830,17 @@ void RemoteID_Tick(uint32_t nowMs)
     // while a phone is mid-session (don't cut off an in-flight write). ----
     if (s_phase == RID_CONFIG) {
         bool windowExpired = (nowMs - s_bootMs) >= REMOTEID_CONFIG_WINDOW_MS;
+        // Hard cap: a client that just sits connected must not hold the
+        // broadcast off for the whole flight. Disconnect it (loop task - not from
+        // a host-task callback) and carry on to broadcast regardless.
+        if ((nowMs - s_bootMs) >= REMOTEID_CONFIG_MAX_MS && s_clientConnected) {
+            if (s_server) {
+                std::vector<uint16_t> peers = s_server->getPeerDevices();
+                for (uint16_t connId : peers) s_server->disconnect(connId);
+            }
+            s_clientConnected = false;
+            DBGLN("[RID] config max time reached with a client still connected - disconnecting");
+        }
         if ((windowExpired || s_configWriteDone) && !s_clientConnected) {
             s_adv->stop(2);
             s_phase = RID_BROADCAST;
@@ -803,9 +851,12 @@ void RemoteID_Tick(uint32_t nowMs)
     }
 
     // ---- BROADCAST phase ----
-    static uint32_t last = 0;
-    if (nowMs - last < REMOTEID_BROADCAST_PERIOD_MS) return;
-    last = nowMs;
+    // Two independent timers: Legacy (instance 0) steps its slot schedule every
+    // REMOTEID_LEGACY_PERIOD_MS, Coded (instance 1) sends its pack every
+    // REMOTEID_BROADCAST_PERIOD_MS.
+    static uint32_t lastLegacy = 0, lastCoded = 0;
+    const bool legacyDue = s_legacyEnabled && (nowMs - lastLegacy) >= REMOTEID_LEGACY_PERIOD_MS;
+    const bool codedDue  = s_codedEnabled  && (nowMs - lastCoded)  >= REMOTEID_BROADCAST_PERIOD_MS;
 
     // GPS telemetry is only as fresh as the last sniffed CRSF GPS frame;
     // if the sniffer lost lock on the RC link, stop claiming a fix. See
@@ -840,37 +891,34 @@ void RemoteID_Tick(uint32_t nowMs)
         DBGLN("[RID] GPS fix acquired - resuming ODID broadcast");
     }
 
+    if (!legacyDue && !codedDue) return;
+
     ODID_UAS_Data uas;
     fillUasData(&uas);
-    s_msgCounter++;
 
-    // Instance 0 (Legacy, 1M PHY): 31-byte cap -> one message per tick.
-    // Bias toward Location (the only ASTM-mandated >=1Hz field): 2 of every
-    // 3 ticks send Location, the 3rd alternates Basic ID / System so
-    // Legacy-only scanners still see identity, not just position.
-    // Runtime-toggleable (s_legacyEnabled, "L:" serial command / GCS) - if
-    // it's off there's nothing to build; RemoteID_SetLegacyEnabled already
-    // stopped the instance itself when it was switched off.
-    if (s_legacyEnabled) {
+    // Instance 0 (Legacy, 1M PHY): 31-byte cap -> one message per slot, on the
+    // 6-slot schedule in ghost_logic.h (Location, Basic ID, Location, System,
+    // Location, Operator ID). A slot whose message is invalid or fails to
+    // encode falls back to Location. Runtime-toggleable (s_legacyEnabled, "L:"
+    // serial command / GCS) - if it's off there's nothing to build;
+    // RemoteID_SetLegacyEnabled already stopped the instance itself.
+    if (legacyDue) {
+        lastLegacy = nowMs;
+        static uint8_t slot = 0;
         ODID_Message_encoded single;
-        static uint8_t rr = 0;
-        static bool sendBasicIdNext = true;
-        rr = (rr + 1) % 3;
         int ok = -1;
-        if (rr == 2) {
-            if (sendBasicIdNext && uas.BasicIDValid[0])
-                ok = encodeBasicIDMessage(&single.basicId, &uas.BasicID[0]);
-            else if (uas.SystemValid)
-                ok = encodeSystemMessage(&single.system, &uas.System);
-            sendBasicIdNext = !sendBasicIdNext;
-        }
+        uint8_t kind = ghostLegacyKind(slot, uas.BasicIDValid[0], uas.SystemValid, uas.OperatorIDValid);
+        slot = (slot + 1) % GHOST_LEG_SLOTS;
+        if (kind == GHOST_LEG_BASICID)        ok = encodeBasicIDMessage(&single.basicId, &uas.BasicID[0]);
+        else if (kind == GHOST_LEG_SYSTEM)    ok = encodeSystemMessage(&single.system, &uas.System);
+        else if (kind == GHOST_LEG_OPERATOR)  ok = encodeOperatorIDMessage(&single.operatorId, &uas.OperatorID);
         if (ok != ODID_SUCCESS && uas.LocationValid)
             ok = encodeLocationMessage(&single.location, &uas.Location);
 
         if (ok == ODID_SUCCESS) {
             uint8_t legacyPayload[2 + ODID_MESSAGE_SIZE];
             legacyPayload[0] = ODID_AD_APP_CODE;
-            legacyPayload[1] = s_msgCounter;
+            legacyPayload[1] = s_msgCounter++;
             memcpy(legacyPayload + 2, single.rawData, ODID_MESSAGE_SIZE);
             setServiceDataInstance(0, legacyPayload, sizeof(legacyPayload), /*legacy=*/true, BLE_HCI_LE_PHY_1M);
         }
@@ -878,13 +926,15 @@ void RemoteID_Tick(uint32_t nowMs)
 
     // Instance 1 (Long Range, Coded PHY): full pack in one extended advert.
     // Runtime-toggleable (s_codedEnabled, "R:" serial command / GCS).
-    if (!s_codedEnabled) return;
-    uint8_t packPayload[2 + 3 + ODID_PACK_MAX_MESSAGES * ODID_MESSAGE_SIZE];
-    packPayload[0] = ODID_AD_APP_CODE;
-    packPayload[1] = s_msgCounter;
-    int packLen = buildMessagePack(&uas, packPayload + 2, sizeof(packPayload) - 2);
-    if (packLen > 0) {
-        setServiceDataInstance(1, packPayload, 2 + (size_t)packLen, /*legacy=*/false, BLE_HCI_LE_PHY_CODED);
+    if (codedDue) {
+        lastCoded = nowMs;
+        uint8_t packPayload[2 + 3 + ODID_PACK_MAX_MESSAGES * ODID_MESSAGE_SIZE];
+        packPayload[0] = ODID_AD_APP_CODE;
+        packPayload[1] = s_msgCounter++;
+        int packLen = buildMessagePack(&uas, packPayload + 2, sizeof(packPayload) - 2);
+        if (packLen > 0) {
+            setServiceDataInstance(1, packPayload, 2 + (size_t)packLen, /*legacy=*/false, BLE_HCI_LE_PHY_CODED);
+        }
     }
 }
 
@@ -905,6 +955,16 @@ void RemoteID_Transport_Init(void)
     }
     RemoteID_ReportOperatorId();   // emit parseable OPID= line at boot for a GCS
 
+    // Random Basic ID serial: generated once, then stable across reboots. The BT
+    // controller is up (NimBLEDevice::init above), so esp_random() is a true RNG.
+    if (s_prefs.getBytes("ridId", s_ridId, sizeof(s_ridId)) != sizeof(s_ridId)) {
+        uint32_t r0 = esp_random(), r1 = esp_random();
+        memcpy(s_ridId, &r0, 4);
+        memcpy(s_ridId + 4, &r1, 2);
+        s_prefs.putBytes("ridId", s_ridId, sizeof(s_ridId));
+        DBGLN("[RID] generated new random Basic ID, saved to NVS");
+    }
+
     s_classNum = s_prefs.getUChar("class", REMOTEID_DEFAULT_CLASS);
     if (s_classNum != REMOTEID_CLASS_LEGACY && s_classNum != REMOTEID_CLASS_C0)
         s_classNum = REMOTEID_DEFAULT_CLASS;   // guard against garbage/stale NVS
@@ -912,6 +972,15 @@ void RemoteID_Transport_Init(void)
 
     s_legacyEnabled = s_prefs.getBool("legacyEn", true);
     s_codedEnabled  = s_prefs.getBool("codedEn", true);
+    if (!s_legacyEnabled && !s_codedEnabled) {
+        // Both PHYs off would persist across reboots and leave Remote ID silently
+        // dead. Re-enable both for this boot (and in NVS); the user can switch one
+        // off again at runtime, but never both permanently without noticing.
+        s_legacyEnabled = s_codedEnabled = true;
+        s_prefs.putBool("legacyEn", true);
+        s_prefs.putBool("codedEn", true);
+        DBGLN("[RID] WARNING: both Legacy and Coded PHY were disabled in NVS - Remote ID would be silent. Re-enabled both.");
+    }
     RemoteID_ReportLegacyEnabled(); // emit parseable LEGACY= line at boot for a GCS
     RemoteID_ReportCodedEnabled();  // emit parseable CODED= line at boot for a GCS
 
@@ -931,6 +1000,7 @@ void RemoteID_Transport_Init(void)
     // (instances 0/1) does not start until RemoteID_Tick transitions to
     // RID_BROADCAST, so the phone can connect without radio contention.
     NimBLEServer *server = NimBLEDevice::createServer();
+    s_server = server;
     server->setCallbacks(new RIDServerCallbacks());   // re-advertise config on disconnect
     NimBLEService *svc = server->createService(NUS_SERVICE);
     NimBLECharacteristic *rx =

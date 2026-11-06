@@ -23,6 +23,10 @@ watching the debug console (USB‑CDC @ 460800).
 - [ ] `O?` (or GCS Read) → Operator ID reads back correctly.
 - [ ] `C?` (or GCS Read) → EU class reads back as intended (**C0 vs Legacy —
       decide this before flying**, not after; see `docs/06` §8.4).
+- [ ] Operator ID shows on an iOS or Legacy‑only scanner (Legacy instance 0
+      cycles it in; not just on a Coded‑PHY‑capable Android).
+- [ ] Basic ID (`ELRS-<random hex>`) is identical across reboots (random,
+      generated once, stored in NVS) and does not match the binding UID.
 - [ ] Config window opens (`config instance ... up - open 60s`) and closes on
       timeout if untouched (`config window closed (timeout)`).
 - [ ] `hardware.json` / `options.json` on SPIFFS match this aircraft's real

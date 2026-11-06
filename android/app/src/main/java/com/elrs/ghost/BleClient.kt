@@ -21,7 +21,7 @@ class BleClient(
         val RX: UUID  = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E") // phone -> ESP
         val TX: UUID  = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E") // ESP -> phone
         val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        const val DEVICE_NAME = "T3S3 Ghost RX"
+        const val DEVICE_NAME = "ELRS TLM RX"
     }
 
     private var gatt: BluetoothGatt? = null

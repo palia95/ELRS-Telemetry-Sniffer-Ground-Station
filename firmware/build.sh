@@ -49,11 +49,11 @@ else:
 if phrase:
     s = re.sub(r'(?m)^\s*#?\s*-DMY_BINDING_PHRASE=.*$', '', s)   # drop any existing
     s = s.rstrip() + '\n-DMY_BINDING_PHRASE="%s"\n' % phrase
-    print('user_defines.txt: set binding phrase "%s" + ISM2400 domain' % phrase)
+    print('user_defines.txt: binding phrase set + ISM2400 domain')
 else:
     has = re.search(r'(?m)^\s*-DMY_BINDING_PHRASE=.*$', s)
     print('user_defines.txt: ISM2400 domain ensured; '
-          + ('phrase kept: ' + has.group(0).strip() if has
+          + ('binding phrase kept' if has
              else 'NO PHRASE SET -> pass it as the 3rd arg, or the sniffer cannot lock'))
 
 open(path, "w").write(s)
@@ -91,7 +91,7 @@ else:
     # it from the phrase so it's stable per-phrase but non-zero (0 == "unset").
     disc = struct.unpack('<I', digest[6:10])[0] or 0xE1725A9D
     json.dump({"uid": uid, "flash-discriminator": disc}, open(outp, "w"))
-    print("options.json: uid=%s flash-discriminator=%d (phrase '%s')" % (uid, disc, phrase))
+    print("options.json: UID + flash-discriminator written from the binding phrase")
 PY
 echo "staged data/ -> flash with: pio run -e $ENV -t uploadfs"
 python3 - "$SRC/platformio.ini" <<'PY'

@@ -86,6 +86,10 @@ Relevant types (`crsf_protocol.h`): GPS `0x02`, Vario `0x07`, Battery `0x08`,
 Baro `0x09`, Link stats `0x14`, Attitude `0x1E`, Flight mode `0x21`, Device info
 `0x29`. The Android `CrsfParser.kt` decodes these (all fields big‑endian).
 
+Reassembled frames are CRC, length and sequence checked before they reach any
+sink (serial, BLE, UDP, Remote ID, OLED); frames that fail are dropped and
+counted in the heartbeat.
+
 ## 8. SX1280 2.4 GHz air‑rate table (`common.cpp`)
 
 | idx | Rate | Modem | SF/BR · BW | CR | TLM | Hop | Size |

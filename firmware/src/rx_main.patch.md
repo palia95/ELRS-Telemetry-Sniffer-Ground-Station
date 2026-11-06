@@ -20,23 +20,31 @@ in `HWtimerCallbackTock()` still advances the hop pointer whether or not we TX.
 #include "sniffer.h"
 ```
 
-### 2. Never transmit — make the telemetry slot receive-only
+### 2. Never transmit — arm RX in the telemetry slot
 
-In `HandleSendTelemetryResponse()` (≈ line 476), add the guard as the very
-first statement:
+In `HandleSendTelemetryResponse()` (≈ line 476), insert the block **after** the
+existing "don't bother sending tlm" guard (not at the top):
 
 ```cpp
-bool ICACHE_RAM_ATTR HandleSendTelemetryResponse()
-{
+    if ((connectionState == disconnected) || (ExpressLRS_currTlmDenom == 1) || (alreadyTLMresp == true) || (modresult != 0) || !teamraceHasModelMatch)
+    {
+        return false; // don't bother sending tlm if disconnected or TLM is off
+    }
 #if defined(GHOST_NO_TX)
-    // Ghost sniffer: never key the radio. Returning false keeps us in the
-    // continuous-RX state established by the last RXnb(), so we passively
-    // overhear the aircraft RX's telemetry in this slot instead of sending.
+    // Ghost sniffer: this IS a telemetry slot. Rather than transmit our own
+    // telemetry, arm the radio in RX so we overhear the aircraft telemetry.
+    // IMPORTANT: do NOT set alreadyTLMresp here. ...
+    Radio.RXnb();
     return false;
 #endif
-    uint8_t modresult = (OtaNonce + 1) % ExpressLRS_currTlmDenom;
-    ...
 ```
+
+Why: the guard filters out non-telemetry slots, so reaching the new block means
+the slot is a real telemetry slot; we call `Radio.RXnb()` to listen in it and
+return `false` so nothing is transmitted. `alreadyTLMresp` must **not** be set:
+that flag makes the tick skip `LQCalc.inc()`, leaving `LQCalc.currentIsSet()`
+true, which makes `RXdoneISR` drop the incoming telemetry packet before
+`ProcessRFPacket` ever runs.
 
 ### 3. Capture telemetry packets
 
@@ -73,18 +81,28 @@ In `SetRFLinkRate()` (≈ line 347), right after `OtaUpdateSerializers(...)`
 #endif
 ```
 
-### 5. Emit completed CRSF frames from the main loop
+### 5. Init transports and emit completed CRSF frames
 
-In `loop()`, near the other periodic handlers:
+After `devicesStart();` in `setup()`:
+
+```cpp
+    devicesStart();
+#if defined(GHOST_SNIFFER)
+    Ghost_SetupTransports();
+#endif
+```
+
+In `loop()`, right after `devicesUpdate(now);`:
 
 ```cpp
 #if defined(GHOST_SNIFFER)
-    Ghost_Loop(now);           // forward reassembled CRSF frames + update OLED
+    Ghost_Loop(now);           // forward reassembled CRSF frames
 #endif
 ```
 
 `Ghost_Loop()` calls `Sniffer_Poll()` (fan reassembled frames to the transports)
-and, when `-D GHOST_DISPLAY` is set, `GhostDisplay_Tick()` to refresh the OLED.
+and `GhostDisplay_Tick()` (a no-op kept for the call site; the OLED runs in its
+own FreeRTOS task when `-D GHOST_DISPLAY` is set).
 
 ### 6. Set the UID
 
@@ -103,6 +121,33 @@ Two options:
 In `lib/WIFI/devWIFI.cpp`, in the `TARGET_RX` auto-WiFi branch, add an early
 `return DURATION_NEVER;` so a monitored link going quiet doesn't kick the
 sniffer into WiFi-config mode. Remove to restore stock behaviour.
+
+### 8. Diagnostic: count every demodulated packet
+
+At the very top of `ProcessRFPacket()` (before any CRC/UID check):
+
+```cpp
+bool ICACHE_RAM_ATTR ProcessRFPacket(SX12xxDriverCommon::rx_status const status)
+{
+#if defined(GHOST_SNIFFER)
+    Sniffer_OnRawPacket(status == SX12xxDriverCommon::SX12XX_RX_OK);
+#endif
+```
+
+### 9. Per-packet RSSI/SNR of the drone's telemetry
+
+In `ProcessRFPacket()`, right after `Radio.GetLastPacketStats(); getRFlinkInfo();`
+(so the stats belong to the packet just received):
+
+```cpp
+#if defined(GHOST_SNIFFER)
+    Sniffer_OnPacketStats(otaPktPtr->std.type, Radio.LastPacketRSSI, Radio.LastPacketSNRRaw);
+#endif
+```
+
+This lets the sniffer measure RSSI/LQ of the aircraft's telemetry packets
+(`PACKET_TYPE_TLM`) separately from the RC packets that dominate
+`CRSF::LinkStatistics` (which reflect the handset TX link).
 
 ---
 

@@ -93,8 +93,8 @@
       <div class="foot" id="opidFoot" style="margin-top:2px"></div>
       <div class="row">
         <select id="uaClass" title="Self-built aircraft can't claim manufacturer-declared classes C1-C6">
+          <option value="0" selected>Legacy (no class marking)</option>
           <option value="1">C0</option>
-          <option value="0">Legacy (no class marking)</option>
         </select>
         <button id="classBtn">Set class</button>
         <button id="classRead">Read</button>
@@ -170,15 +170,19 @@
 <script src="/static/leaflet.js"></script>
 <script>
 const $ = id => document.getElementById(id);
+// Escape untrusted strings (BLE names, addresses, port names) before innerHTML.
+const esc = v => String(v==null?'':v).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const model = {};
 let lastRx = 0;      // last message of any kind (sniffer stream alive?)
 let tlmAge = null;   // seconds since last real drone telemetry (from backend)
 let lastSrcStatus = null;               // to detect connect transitions
+let lastSrcKind = null;                 // 'serial' | 'ble' | null
 const PHRASE_KEY = 'elrs_tlm_phrase';   // remembered binding phrase
 
 // ---------- Map ----------
-const map = L.map('map', {zoomControl:true, attributionControl:false}).setView([0,0], 2);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19})
+const map = L.map('map', {zoomControl:true, attributionControl:true}).setView([0,0], 2);
+L.tileLayer('/tiles/{z}/{x}/{y}.png', {maxZoom:19,
+  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'})
   .addTo(map);
 let marker = null, trail = L.polyline([], {color:'#00e5ff', weight:2, opacity:.8}).addTo(map);
 let havePos = false, follow = true;
@@ -193,6 +197,7 @@ function droneIcon(hdg){
 }
 function updateMap(){
   if(model.lat==null||model.lon==null) return;
+  if(model.lat===0 && model.lon===0) return;   // no-fix frame: don't jump to null island
   const ll=[model.lat, model.lon];
   if(!marker){ marker = L.marker(ll, {icon:droneIcon(model.heading_deg)}).addTo(map); }
   else { marker.setLatLng(ll); marker.setIcon(droneIcon(model.heading_deg)); }
@@ -288,7 +293,7 @@ function updatePanel(){
   $('curr').textContent  = f1(model.batt_a,' A');
   $('mah').textContent   = f0(model.batt_mah,' mAh');
   $('pct').textContent   = f0(model.batt_pct,' %');
-  $('rssi').textContent  = model.link_rssi1_dbm==null?'—':model.link_rssi1_dbm+' dBm';
+  $('rssi').textContent  = (model.link_rssi1_dbm==null||model.link_rssi1_dbm===0)?'—':model.link_rssi1_dbm+' dBm';   // 0 = no signal
   $('lq').textContent    = model.link_lq==null?'—':model.link_lq;
   $('framesTxt').textContent = (model.frames||0)+' frames';
 }
@@ -323,23 +328,32 @@ function connect(){
       $('classFoot').textContent = 'Current: ' + (d.value===1 ? 'C0' : 'Legacy (no class marking)');
       return;
     }
-    if(d.type==='legacy_enabled'){ $('legacyEn').checked = !!d.value; return; }
-    if(d.type==='coded_enabled'){ $('codedEn').checked = !!d.value; return; }
+    if(d.type==='legacy_enabled'){ $('legacyEn').checked = !!d.value; if(!phyWarn()) $('phyFoot').textContent = PHY_NOTE; return; }
+    if(d.type==='coded_enabled'){ $('codedEn').checked = !!d.value; if(!phyWarn()) $('phyFoot').textContent = PHY_NOTE; return; }
     if(d.type!=='telemetry') return;
     lastRx = Date.now();
     if('tlm_age' in d) tlmAge = d.tlm_age;
     for(const k in d){ if(d[k]!==null && d[k]!==undefined) model[k]=d[k]; }
-    const rec=$('recBtn');
-    if(d.logging){ rec.classList.add('rec'); rec.textContent='■ Stop'; $('logFoot').textContent='Recording → '+(d.log_path||''); }
-    else { rec.classList.remove('rec'); rec.textContent='● Record'; if(!model._everLogged) $('logFoot').textContent='Not recording.'; }
-    if(d.logging) model._everLogged=true;
+    setRec(d.logging, d.log_path);
     redraw();
   };
   ws.onclose = ()=> setTimeout(connect, 1500);
 }
 
+let logError = null;
+function setRec(logging, path){
+  const rec=$('recBtn');
+  if(logging){ rec.classList.add('rec'); rec.textContent='■ Stop'; $('logFoot').textContent='Recording → '+(path||''); }
+  else {
+    rec.classList.remove('rec'); rec.textContent='● Record';
+    $('logFoot').textContent = logError || 'Not recording.';
+  }
+}
+
 function renderSources(d){
   const s = d.source || {};
+  logError = d.log_error || null;
+  setRec(d.logging, d.log_path);
   const chip = $('srcChip');
   chip.textContent = s.status + (s.kind ? ' · '+s.kind : '');
   chip.className = 'chip' + (s.status==='connected'?' on':(s.status==='error'?' err':(s.status==='connecting'?' conn':'')));
@@ -361,28 +375,30 @@ function renderSources(d){
     setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_coded_enabled'})); }catch(e){} }, 1800);
   }
   lastSrcStatus = s.status;
+  lastSrcKind = s.kind;
   // Recordings folder: server-authoritative, persisted across restarts (see
   // gcs.py _settings_path). Don't clobber the field while the user is typing.
   if(d.log_dir!==undefined && document.activeElement!==$('logDir')) $('logDir').value = d.log_dir;
   // serial dropdown (keep current selection if still valid)
   const sel = $('serialSel'), cur = sel.value;
   sel.innerHTML = '<option value="">— serial ports —</option>' +
-    (d.serial_ports||[]).map(p=>`<option value="${p.port}">${p.port}</option>`).join('');
+    (d.serial_ports||[]).map(p=>`<option value="${esc(p.port)}">${esc(p.port)}</option>`).join('');
   if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
   else if(s.kind==='serial' && s.desc) sel.value=s.desc;
   // BLE device list (collapsible)
   const bl = $('bleList'), n = (d.ble_devices||[]).length;
-  $('bleHdr').style.display = (n>0 || d.scanning) ? 'flex' : 'none';
+  $('bleHdr').style.display = (n>0 || d.scanning || d.scan_error) ? 'flex' : 'none';
   $('bleCount').textContent = n ? '('+n+')' : '';
   if(d.scanning){ bl.innerHTML='<div style="font-size:12px;color:var(--mut)">scanning…</div>'; }
   else {
+    const scanErr = d.scan_error ? `<div style="font-size:12px;color:var(--bad)">Scan failed: ${esc(d.scan_error)}</div>` : '';
     const items = (d.ble_devices||[]).map(x=>{
       const label=(x.name||'(unnamed)')+(x.match?' ★':'');
       const rssi=(x.rssi!=null)?x.rssi+' dBm':'';
-      return `<div class="dev" data-addr="${x.addr}" data-name="${(x.name||'').replace(/"/g,'&quot;')}">
-        <span class="${x.match?'g':''}">${label}</span><small>${rssi}</small></div>`;
+      return `<div class="dev" data-addr="${esc(x.addr)}" data-name="${esc(x.name||'')}">
+        <span class="${x.match?'g':''}">${esc(label)}</span><small>${esc(rssi)}</small></div>`;
     }).join('');
-    bl.innerHTML = items || '<div style="font-size:12px;color:var(--mut)">no devices — tap Scan BLE</div>';
+    bl.innerHTML = scanErr + (items || (scanErr ? '' : '<div style="font-size:12px;color:var(--mut)">no devices — tap Scan BLE</div>'));
     bl.querySelectorAll('.dev').forEach(el=>el.onclick=()=>{
       ws.send(JSON.stringify({cmd:'connect_ble', addr:el.dataset.addr, name:el.dataset.name}));
     });
@@ -402,13 +418,24 @@ $('scanBtn').onclick = ()=> ws.send(JSON.stringify({cmd:'scan_ble'}));
 $('serialBtn').onclick = ()=>{ const p=$('serialSel').value; if(p) ws.send(JSON.stringify({cmd:'connect_serial', port:p})); };
 $('dcBtn').onclick = ()=> ws.send(JSON.stringify({cmd:'disconnect'}));
 
+// ---- device commands ----
+// connected() gates every "Sent" message: with no transport the server silently
+// drops the command. Only serial carries the read-back and the PHY/time commands
+// (TransportManager); BLE can set phrase / Operator ID / class (write-only).
+const connected = ()=> lastSrcStatus==='connected';
+const serialConn = ()=> connected() && lastSrcKind==='serial';
+const NOT_CONN = 'Not connected.';
+const SERIAL_ONLY = 'Serial only - connect over USB.';
+function send(o){ try{ ws.send(JSON.stringify(o)); }catch(e){} }
+
 // ---- binding phrase -> ELRS UID ----
 $('phrase').value = localStorage.getItem(PHRASE_KEY) || '';
 function sendPhrase(){
   const p = $('phrase').value.trim();
   if(!p){ $('phraseFoot').textContent = 'Enter a binding phrase first.'; return; }
   localStorage.setItem(PHRASE_KEY, p);
-  ws.send(JSON.stringify({cmd:'set_phrase', phrase:p}));
+  if(!connected()){ $('phraseFoot').textContent = 'Saved - will send on connect.'; return; }
+  send({cmd:'set_phrase', phrase:p});
   $('phraseFoot').textContent = 'Sent — sniffer re-deriving UID and re-locking…';
 }
 $('phraseBtn').onclick = sendPhrase;
@@ -418,29 +445,47 @@ $('phrase').addEventListener('keydown', e=>{ if(e.key==='Enter') sendPhrase(); }
 function sendOperatorId(){
   const o = $('opid').value.trim();
   if(!o){ $('opidFoot').textContent = 'Enter an Operator ID first.'; return; }
-  ws.send(JSON.stringify({cmd:'set_operator_id', operator_id:o}));
+  if(!connected()){ $('opidFoot').textContent = NOT_CONN; return; }
+  send({cmd:'set_operator_id', operator_id:o});
   $('opidFoot').textContent = 'Sent — saving to device NVS…';
 }
 $('opidBtn').onclick = sendOperatorId;
 $('opid').addEventListener('keydown', e=>{ if(e.key==='Enter') sendOperatorId(); });
-$('opidRead').onclick = ()=>{ ws.send(JSON.stringify({cmd:'get_operator_id'})); $('opidFoot').textContent='Reading…'; };
+$('opidRead').onclick = ()=>{
+  if(!connected()){ $('opidFoot').textContent = NOT_CONN; return; }
+  if(!serialConn()){ $('opidFoot').textContent = 'Read-back: '+SERIAL_ONLY; return; }
+  send({cmd:'get_operator_id'}); $('opidFoot').textContent='Reading…';
+};
 
-// ---- EU UA class (Remote ID firmware, default C0) ----
+// ---- EU UA class (Remote ID firmware, default Legacy) ----
 $('classBtn').onclick = ()=>{
-  ws.send(JSON.stringify({cmd:'set_class', class_num: parseInt($('uaClass').value, 10)}));
+  if(!connected()){ $('classFoot').textContent = NOT_CONN; return; }
+  send({cmd:'set_class', class_num: parseInt($('uaClass').value, 10)});
   $('classFoot').textContent = 'Sent — saving to device NVS…';
 };
-$('classRead').onclick = ()=>{ ws.send(JSON.stringify({cmd:'get_class'})); $('classFoot').textContent='Reading…'; };
+$('classRead').onclick = ()=>{
+  if(!connected()){ $('classFoot').textContent = NOT_CONN; return; }
+  if(!serialConn()){ $('classFoot').textContent = 'Read-back: '+SERIAL_ONLY; return; }
+  send({cmd:'get_class'}); $('classFoot').textContent='Reading…';
+};
 
-// ---- Per-PHY broadcast enable (Remote ID firmware, both default on) ----
-$('legacyEn').onchange = ()=>{
-  ws.send(JSON.stringify({cmd:'set_legacy_enabled', enabled: $('legacyEn').checked}));
-  $('phyFoot').textContent = 'Sent — saving to device NVS…';
-};
-$('codedEn').onchange = ()=>{
-  ws.send(JSON.stringify({cmd:'set_coded_enabled', enabled: $('codedEn').checked}));
-  $('phyFoot').textContent = 'Sent — saving to device NVS…';
-};
+// ---- Per-PHY broadcast enable (Remote ID firmware, both default on; serial only) ----
+const PHY_NOTE = $('phyFoot').textContent;
+function phyWarn(){
+  if(!$('legacyEn').checked && !$('codedEn').checked){
+    $('phyFoot').textContent = 'Warning: both PHYs off - the firmware re-enables both at boot, so nothing would be broadcast until then.';
+    return true;
+  }
+  return false;
+}
+function phyChanged(cmd, el){
+  if(!connected()){ $('phyFoot').textContent = NOT_CONN; return; }
+  if(!serialConn()){ $('phyFoot').textContent = SERIAL_ONLY; return; }
+  send({cmd, enabled: el.checked});
+  if(!phyWarn()) $('phyFoot').textContent = 'Sent — saving to device NVS…';
+}
+$('legacyEn').onchange = ()=> phyChanged('set_legacy_enabled', $('legacyEn'));
+$('codedEn').onchange = ()=> phyChanged('set_coded_enabled', $('codedEn'));
 
 // ---- Recordings folder: set once, persisted server-side across restarts ----
 function setLogDir(path){
