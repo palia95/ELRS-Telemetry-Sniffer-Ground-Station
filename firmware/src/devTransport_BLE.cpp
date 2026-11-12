@@ -49,6 +49,12 @@ static volatile bool s_pendingPhraseSet = false;
 class RxCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic *c) override {
         std::string v = c->getValue();
+        // "P:" is off unless built with -D GHOST_BLE_ALLOW_PHRASE: this link is
+        // unpaired and unencrypted, so anyone in range could read the phrase off
+        // the air or retarget the sniffer. Use the serial "P:" command instead.
+#if !defined(GHOST_BLE_ALLOW_PHRASE)
+        if (v.rfind("P:", 0) == 0) { DBGLN("[TLM RX] BLE phrase write ignored (serial only)"); return; }
+#endif
         if (v.rfind("P:", 0) == 0) {
             std::string phrase = v.substr(2);
             // strip trailing newline

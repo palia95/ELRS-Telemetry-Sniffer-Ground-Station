@@ -63,7 +63,8 @@ python3 gcs.py --ble "ELRS TLM RX"      # name, MAC, or UUID
 The **Source** panel has a binding-phrase field — type the target link's
 phrase and hit **Set UID**: the GCS sends `P:<phrase>` to the sniffer, which
 re-derives the UID and re-locks, no reflash needed. Remembered in the
-browser and re-sent automatically on every connect.
+browser and re-sent automatically on every **serial** connect. It is never
+sent over BLE (unpaired, unencrypted link).
 
 ### Logging
 

@@ -224,20 +224,17 @@ class TransportManager:
         return {"kind": self.kind, "desc": self.desc, "status": self.status}
 
     async def send_phrase(self, phrase):
-        """Push a binding phrase to the sniffer so it recomputes the ELRS UID."""
+        """Push a binding phrase to the sniffer so it recomputes the ELRS UID.
+        Serial only: the phrase is control authority over the aircraft and the
+        BLE link is unpaired and unencrypted, so it never goes over the air."""
         phrase = (phrase or "").strip()
         if not phrase:
             return
-        payload = ("P:" + phrase + "\n").encode()
         if self.kind == "serial":
-            self._tx.put(payload)
+            self._tx.put(("P:" + phrase + "\n").encode())
             print("[gcs] queued phrase over serial")
-        elif self.kind == "ble" and self._ble_client is not None:
-            try:
-                await self._ble_client.write_gatt_char(NUS_RX, payload, response=False)
-                print("[gcs] sent phrase over BLE")
-            except Exception as e:
-                print(f"[gcs] BLE phrase write failed: {e}")
+        else:
+            print("[gcs] phrase not sent: serial only")
 
     async def send_operator_id(self, opid):
         """Set the ODID Operator ID on the Remote ID firmware (mirrors "O:<id>")."""
@@ -389,7 +386,7 @@ def serial_reader(hub, port, baud, stop, mgr):
         return
     while not stop.is_set():
         try:
-            with serial.Serial(port, baud, timeout=1) as ser:
+            with serial.Serial(port, baud, timeout=0.1) as ser:
                 mgr.mark("connected", port)
                 print(f"[gcs] serial connected {port} @ {baud}")
                 buf = b""
@@ -400,7 +397,9 @@ def serial_reader(hub, port, baud, stop, mgr):
                             ser.write(mgr._tx.get_nowait())
                     except queue.Empty:
                         pass
-                    chunk = ser.read(256)
+                    # read(256) would block until 256 bytes or the timeout: take
+                    # what is waiting so lines (and queued commands) are not delayed.
+                    chunk = ser.read(ser.in_waiting or 1)
                     if not chunk:
                         continue
                     buf += chunk

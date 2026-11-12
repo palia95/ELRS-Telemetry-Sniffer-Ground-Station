@@ -355,6 +355,7 @@ void Ghost_Loop(uint32_t nowMs)
     static uint32_t lastHb = 0;
     if (nowMs - lastHb >= 1000)
     {
+        const uint32_t elapsedMs = nowMs - lastHb;
         lastHb = nowMs;
         uint16_t hz = ExpressLRS_currAirRate_Modparams
                     ? (uint16_t)(1000000UL / ExpressLRS_currAirRate_Modparams->interval) : 0;
@@ -362,10 +363,10 @@ void Ghost_Loop(uint32_t nowMs)
         uint32_t hits = s_tlmPkts - s_tlmPktsPrev;
         s_tlmPktsPrev = s_tlmPkts;
         uint8_t denom = ExpressLRS_currTlmDenom;
-        uint32_t expected = (denom > 1 && hz > 0) ? (hz / denom) : 0;
-        if (connectionState == connected && expected > 0) {
-            uint32_t lq = (100u * hits) / expected;
-            s_tlmLq = (uint8_t)(lq > 100 ? 100 : lq);
+        // expected slots = hz * elapsed / denom, kept fractional: integer hz/denom
+        // overstated LQ (150/32 -> 4, real 4.69) and was 0 below 1 slot/s.
+        if (connectionState == connected && denom > 1 && hz > 0) {
+            s_tlmLq = ghostTlmLq(hits, hz, denom, elapsedMs);
         } else {
             s_tlmLq = 0;
         }

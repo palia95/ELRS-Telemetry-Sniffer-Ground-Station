@@ -362,7 +362,8 @@ function renderSources(d){
   // UID (effective persistence across reboots/reconnects without flash writes).
   if(s.status==='connected' && lastSrcStatus!=='connected'){
     const p=(localStorage.getItem(PHRASE_KEY)||'').trim();
-    if(p) setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'set_phrase', phrase:p})); }catch(e){} }, 800);
+    // Serial only: the phrase must never go over the unencrypted BLE link.
+    if(p && s.kind==='serial') setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'set_phrase', phrase:p})); }catch(e){} }, 800);
     // Ask the Remote ID firmware for its current Operator ID / EU class (serial
     // only; a no-op on non-RemoteID builds, which simply never reply).
     setTimeout(()=>{ try{ ws.send(JSON.stringify({cmd:'get_operator_id'})); }catch(e){} }, 1000);
@@ -421,7 +422,7 @@ $('dcBtn').onclick = ()=> ws.send(JSON.stringify({cmd:'disconnect'}));
 // ---- device commands ----
 // connected() gates every "Sent" message: with no transport the server silently
 // drops the command. Only serial carries the read-back and the PHY/time commands
-// (TransportManager); BLE can set phrase / Operator ID / class (write-only).
+// (TransportManager) and the binding phrase; BLE can set Operator ID / class (write-only).
 const connected = ()=> lastSrcStatus==='connected';
 const serialConn = ()=> connected() && lastSrcKind==='serial';
 const NOT_CONN = 'Not connected.';
@@ -434,7 +435,7 @@ function sendPhrase(){
   const p = $('phrase').value.trim();
   if(!p){ $('phraseFoot').textContent = 'Enter a binding phrase first.'; return; }
   localStorage.setItem(PHRASE_KEY, p);
-  if(!connected()){ $('phraseFoot').textContent = 'Saved - will send on connect.'; return; }
+  if(!serialConn()){ $('phraseFoot').textContent = 'Saved - sent over USB serial only (never BLE).'; return; }
   send({cmd:'set_phrase', phrase:p});
   $('phraseFoot').textContent = 'Sent — sniffer re-deriving UID and re-locking…';
 }

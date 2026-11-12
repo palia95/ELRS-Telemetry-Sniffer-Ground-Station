@@ -71,6 +71,17 @@ static inline uint8_t ghostFrameLen(const uint8_t *buf, uint8_t bufSize, uint16_
     return total;
 }
 
+// ---- Telemetry LQ ----
+// hits = tlm packets received in elapsedMs; expected = hz * elapsedMs / (denom * 1000).
+// Returns 0..100, rounded. Caller guarantees hz > 0 and denom > 1.
+static inline uint8_t ghostTlmLq(uint32_t hits, uint16_t hz, uint8_t denom, uint32_t elapsedMs)
+{
+    const uint64_t den = (uint64_t)hz * elapsedMs;
+    if (den == 0) return 0;
+    const uint64_t lq = ((uint64_t)hits * denom * 100000u + den / 2) / den;
+    return (uint8_t)(lq > 100 ? 100 : lq);
+}
+
 // ---- Remote ID legacy (instance 0) slot schedule ----
 // One 25-byte message per advert. 6-slot cycle at REMOTEID_LEGACY_PERIOD_MS:
 // Location, Basic ID, Location, System, Location, Operator ID.

@@ -84,7 +84,9 @@ Every hardware gotcha (wrong pins, PA/FEM detection, OLED bring-up) is in
 The binding phrase is effectively a shared secret — anyone who has it can
 derive your link's UID and decode its telemetry. `firmware/build.sh` bakes
 it into the firmware at build time, or set it at **runtime** without a
-reflash over serial (`P:<phrase>`) or BLE.
+reflash over serial (`P:<phrase>`). It is never sent over BLE: that link is
+unpaired and unencrypted, and the phrase gives control of the aircraft, not
+just read access (opt back in with `-D GHOST_BLE_ALLOW_PHRASE`).
 
 ## Build & flash
 

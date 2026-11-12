@@ -235,7 +235,19 @@ static void testUnix(void) {
     puts("PASS unix-at-ms (fix before/after sync)");
 }
 
+// Telemetry LQ: fractional expected slots (150 Hz 1:32 = 4.69/s, not 4).
+static void testTlmLq(void) {
+    assert(ghostTlmLq(4, 150, 32, 1000) == 85);    // was 100 with integer hz/denom
+    assert(ghostTlmLq(5, 150, 32, 1000) == 100);   // clamped
+    assert(ghostTlmLq(0, 150, 32, 1000) == 0);
+    assert(ghostTlmLq(1, 50, 64, 1000) == 100);    // <1 slot/s: was forced to 0
+    assert(ghostTlmLq(125, 500, 2, 1000) == 50);
+    assert(ghostTlmLq(5, 150, 32, 2000) == 53);    // late heartbeat scales expected
+    assert(ghostTlmLq(3, 150, 32, 0) == 0);
+}
+
 int main(void) {
+    testTlmLq();
     testClean();
     testLostMiddle();
     testLostFinal();
